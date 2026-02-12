@@ -1,0 +1,14 @@
+python eval_mmeb.py \
+    --model_name Qwen/Qwen3-VL-Embedding-2B \
+    --encode_output_path ./MMEB-evaloutputs/Qwen3VL_embedding_v3/ \
+    --pooling eos \
+    --model_backbone qwen3_vl \
+    --normalize True \
+    --bf16 \
+    --dataset_name TIGER-Lab/MMEB-eval \
+    --subset_name  OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W ScienceQA GQA TextVQA VizWiz \
+    --dataset_split test \
+    --per_device_eval_batch_size 16 \
+    --image_resolution mid \
+    --image_dir /workspace/ComfyUI/models/gligen/VLM_Embed/eval_images \
+    --tgt_prefix_mod
