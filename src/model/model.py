@@ -146,6 +146,7 @@ class MMEBModel(nn.Module):
         elif getattr(self, "model_backbone", None) in [QWEN3_VL]:
             hidden_states = self.encoder(**input, return_dict = True, output_hidden_states=True, output_attentions=True)
             output_hidden_states = hidden_states.hidden_states
+            
             attention_matrix = hidden_states.attentions if hasattr(hidden_states, 'attentions') else None
             last_hidden_state = hidden_states.last_hidden_state
             pooled_output = self._pooling(last_hidden_state, attention_mask=hidden_states.attention_mask)
@@ -354,6 +355,7 @@ class MMEBModel(nn.Module):
                 normalize=model_args.normalize,
                 temperature=model_args.temperature
             )
+            setattr(model, "model_backbone", model_backbone)
 
             return model
         elif model_args.lora:
@@ -408,6 +410,7 @@ class MMEBModel(nn.Module):
                 temperature=model_args.temperature
             )
 
+            setattr(model, "model_backbone", model_backbone)
             return model
         
         model = cls(

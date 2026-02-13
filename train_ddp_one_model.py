@@ -128,8 +128,8 @@ class Trainer:
                             disable=not dist.get_rank() == 0)
         for batch_idx, batch in enumerate(self.train_data):
             batch = to_device(batch, self.device)
-            with torch.autocast(enabled=True, dtype=torch.bfloat16, device_type='cuda'):
-                loss_dict = self.trainer(self.criterion, batch)
+            # with torch.autocast(enabled=True, dtype=torch.bfloat16, device_type='cuda'):
+            loss_dict = self.trainer(self.criterion, batch)
 
             total_loss = loss_dict['loss'] / self.training_args.gradient_accumulation_steps
             contrastive_loss = loss_dict['contrastive_loss']
@@ -146,42 +146,20 @@ class Trainer:
                 self.lr_scheduler.step()
                 self.optimizer.zero_grad()
             
-            if is_main_process():
-                progress_bar.set_postfix({
-                    "loss": f"{batch_loss:.4f}",
-                    "contrastive_loss": f"{batch_contrastive_loss:.4f}",
-                })
-                progress_bar.update(1)
-                # if "wandb" in self.training_args.report_to:
-                #     wandb.log({
-                #         "train/loss": batch_loss,
-                #         "train/contrastive_loss": batch_contrastive_loss,
-                #         "train/rkd_loss": batch_rkd_loss,
-                #         "train/simple_kd_loss": batch_simple_kd_loss,
-                #         "train/intra_rkd_loss": batch_kd_rkd_loss,
-                #         "train/cross_modal_kd_loss": batch_kd_dtw_loss,
-                #         "train/ot_loss": batch_ot_loss,
-                #         "train/img_align_loss": batch_img_align_loss,
-                #     }, step=epoch * (len(self.train_data.dataset) // self.training_args.per_device_train_batch_size // dist.get_world_size()) + batch_idx // self.training_args.gradient_accumulation_steps)
+                if is_main_process():
+                    progress_bar.set_postfix({
+                        "loss": f"{batch_loss:.4f}",
+                        "contrastive_loss": f"{batch_contrastive_loss:.4f}",
+                        "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}"
+                    })
+                    progress_bar.update(1)
             torch.cuda.empty_cache()
-                    
         progress_bar.close()
         
     def train(self):
-        # if "wandb" in self.training_args.report_to and self.gpu_id == 0:
-        #     wandb.init(
-        #         project=self.training_args.output_dir.split("/")[-1],
-        #         name=self.model_args.model_backbone + "_distillation",
-        #         config={
-        #             "learning_rate": self.training_args.learning_rate,
-        #             "batch_size": self.training_args.per_device_train_batch_size,
-        #             "epochs": self.training_args.num_train_epochs,
-        #             "gradient_accumulation_steps": self.training_args.gradient_accumulation_steps,
-        #         }
-        #     )
         for epoch in range(self.training_args.num_train_epochs):
             self.run_epoch(epoch)
-            if self.training_args.save_strategy == "epoch":
+            if is_main_process() and self.training_args.save_strategy == "epoch":
                 ckpt_dir = os.path.join(self.training_args.output_dir, f"checkpoint-epoch-{epoch}")
                 projector_dir = os.path.join(ckpt_dir, "mm_projector.pth")
                 os.makedirs(ckpt_dir, exist_ok=True)
@@ -190,7 +168,7 @@ class Trainer:
                 student.encoder.save_pretrained(ckpt_dir)
                 if self.model_args.model_backbone in ["llava_onevision", "llava_two_vision"]:
                     torch.save(student.encoder.model.multi_modal_projector.state_dict(), projector_dir)
-                else:
+                elif self.model_args.model_backbone in ["llava_qwen2"]:
                     torch.save(student.encoder.model.model.mm_projector.state_dict(), projector_dir)
                     
                 student_config = AutoConfig.from_pretrained(self.model_args.model_name) if self.model_args.model_name else None
@@ -206,7 +184,7 @@ class Trainer:
                 except Exception as e:
                     print_rank(f"Warning: Could not save processor: {e}")
                 print_rank(f"Saved checkpoint to {ckpt_dir}")
-                
+            dist.barrier()
                 
 def main():
     for arg in sys.argv:
