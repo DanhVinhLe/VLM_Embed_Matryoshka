@@ -35,7 +35,7 @@ from transformers import ProcessorMixin
 from qwen_vl_utils import smart_resize
 from PIL import Image
 
-def process_image(image, resolution, max_dim=1344):
+def process_image(image, resolution, max_dim=1024):
     if image is None:
         return None
 
@@ -43,7 +43,7 @@ def process_image(image, resolution, max_dim=1344):
     max_side = max(width, height)
 
     if resolution == "high":
-        target_max = 1344
+        target_max = 1024
     elif resolution == "mid":
         target_max = 672
     elif resolution == "low":

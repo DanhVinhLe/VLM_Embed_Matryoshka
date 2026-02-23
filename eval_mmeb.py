@@ -98,6 +98,11 @@ def main():
         model_args=model_args,
         processor=processor,
     )
+    
+    # Add for matryoshka evaluation
+    nested_dims = getattr(training_args, 'nested_dims', None)
+    if nested_dims:
+        print(f"\033[92mMatryoshka evaluation enabled with nested_dims: {nested_dims}\033[0m")
 
     # ToDo: This part of code is a little bit hacky. Need to refactor later.
     for idx, subset in enumerate(data_args.subset_name):
@@ -251,6 +256,15 @@ def main():
 
         n_correct = 0
         all_pred = []
+        
+        nested_n_correct = {}
+        nested_all_pred = {}
+        
+        if nested_dims:
+            for dim in nested_dims:
+                nested_n_correct[dim] = 0
+                nested_all_pred[dim] = []
+                
         for row in tqdm(eval_data, desc=f"calculate score for {subset}"):
             if model_args.model_backbone == COLPALI:
                 qry_t = qry_key2emb[(row["qry_text"], row["qry_img_path"])]  # (dim,)
@@ -265,6 +279,17 @@ def main():
                 if pred_tkey == pos_tkey:
                     n_correct += 1
                 all_pred.append(pred_tkey)
+                
+                if nested_dims:
+                    for dim in nested_dims:
+                        qry_t_dim = qry_t[:, :dim, :]
+                        tgt_tensor_dim = tgt_tensor[:, :, :dim]
+                        scores_dim = processor.score(qry_t_dim, tgt_tensor_dim, batch_size=1024)
+                        pred_id_dim = torch.argmax(scores_dim, dim=1).cpu().numpy().tolist()[0]
+                        pred_tkey_dim = rowid_to_tgtkey[pred_id_dim]
+                        if pred_tkey_dim == pos_tkey:
+                            nested_n_correct[dim] += 1
+                        nested_all_pred[dim].append(pred_tkey_dim)
             else:
                 try:
                     qry_t = qry_key2emb[(row["qry_text"], row["qry_img_path"])]  # (dim,)
@@ -281,10 +306,32 @@ def main():
                 if pred == 0:
                     n_correct += 1
                 all_pred.append(all_candidates[pred])
+                
+                if nested_dims:
+                    for dim in nested_dims:
+                        qry_t_dim = qry_t[:dim]
+                        tgt_t_dim = tgt_t[:, :dim]
+                        scores_dim, pred_dim = get_pred(qry_t_dim, tgt_t_dim, normalization=model_args.normalize)
+                        if pred_dim == 0:
+                            nested_n_correct[dim] += 1
+                        nested_all_pred[dim].append(all_candidates[pred_dim])
         score_path = os.path.join(data_args.encode_output_path, f"{subset}_score.json")
         print(f"\033[91m{subset} accuracy: {n_correct/len(eval_data)}\033[0m")
         score_dict = {"acc": n_correct/len(eval_data), "num_correct": n_correct, "num_pred": len(eval_data),
                       "num_pred": len(all_pred), "num_data": len(eval_data)}
+        
+        if nested_dims:
+            nested_results = {}
+            for dim in nested_dims:
+                dim_acc = nested_n_correct[dim] / len(eval_data)
+                nested_results[str(dim)] = {
+                    'acc': dim_acc,
+                    'num_correct': nested_n_correct[dim],
+                    'num_pred': len(eval_data),
+                }
+                print(f"\033[92m{subset} nested acc @ dim {dim}: {dim_acc}\033[0m")
+            score_dict['matryoshka'] = nested_results
+            
         print(score_dict)
         print(f"Outputting final score to: {score_path}")
         with open(score_path, "w") as f:
@@ -292,6 +339,13 @@ def main():
         with open(os.path.join(data_args.encode_output_path, f"{subset}_pred.txt"), "w") as f:
             for item in all_pred:
                 f.write(f"{item}\n")
+                
+        # Save matryoshka predictions
+        if nested_dims:
+            for dim in nested_dims:
+                with open(os.path.join(data_args.encode_output_path, f"{subset}_pred_dim{dim}.txt"), "w") as f:
+                    for item in nested_all_pred[dim]:
+                        f.write(f"{item}\n")
 
 
 if __name__ == "__main__":

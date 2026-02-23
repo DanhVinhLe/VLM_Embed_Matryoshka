@@ -25,10 +25,11 @@ from src.model.vlm_backbone.qwen2_vl_tokenselection import \
     Qwen2VLProcessor as Qwen2VLTokenSelectionProcessor
 from src.model.vlm_backbone.internvideo2.modeling_internvideo2 import InternVideo2_Stage2
 from src.model.vlm_backbone.qwen3_vl_embedding.modeling_qwen3_vl_embedding import Qwen3VLForEmbedding
+from src.model.vlm_backbone.smolvlm import SmolVLMForConditionalGeneration, SmolVLMProcessor
 
 from src.model.llava.model.language_model.llava_qwen import LlavaQwen2ForCausalLM
 from src.model.llava.processing_fastvlm import FastVLMProcessor
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoProcessor
 from peft import PeftConfig
 
 
@@ -53,6 +54,7 @@ LamRA = 'lamra'  # QWEN2-VL
 COLPALI = 'colpali'  # PaliGemma-3B
 LLAVA_QWEN2 = 'llava_qwen2'
 QWEN3_VL= 'qwen3_vl'
+SMOLVLM = 'idefics3'
 MODEL2BACKBONE = {  # keys are from hf_config.model_type or manually added if not provided
     'phi3_v': PHI3V,
     'llava_next': LLAVA_NEXT,
@@ -68,7 +70,8 @@ MODEL2BACKBONE = {  # keys are from hf_config.model_type or manually added if no
     'lamra': LamRA,
     'colpali': COLPALI,
     'llava_qwen2': LLAVA_QWEN2,
-    'qwen3_vl': QWEN3_VL
+    'qwen3_vl': QWEN3_VL,
+    'idefics3': SMOLVLM
 }
 SUPPORTED_MODELS = set(MODEL2BACKBONE.keys())
 
@@ -86,7 +89,8 @@ VLM_IMAGE_TOKENS = {
     INTERNVIDEO2: "",
     COLPALI: "",
     LLAVA_QWEN2: "<image>",
-    QWEN3_VL: "<|image_pad|>"
+    QWEN3_VL: "<|image_pad|>",
+    SMOLVLM: "<image>"
 }
 
 VLM_VIDEO_TOKENS = {
@@ -101,7 +105,8 @@ VLM_VIDEO_TOKENS = {
     LamRA: "<|video_pad|>",
     INTERNVIDEO2: "",
     LLAVA_QWEN2: "",
-    QWEN3_VL: "<|video_pad|>"
+    QWEN3_VL: "<|video_pad|>",
+    SMOLVLM: "<video>"
 }
 
 backbone2model = {
@@ -115,7 +120,8 @@ backbone2model = {
     QWEN2_5_VL_TOKENSELECTION: Qwen2_5_VL_TokenSelectionForConditionalGeneration,
     INTERNVIDEO2: InternVideo2_Stage2,
     LLAVA_QWEN2: LlavaQwen2ForCausalLM,
-    QWEN3_VL: Qwen3VLForEmbedding
+    QWEN3_VL: Qwen3VLForEmbedding,
+    SMOLVLM: SmolVLMForConditionalGeneration
 }
 
 
@@ -267,6 +273,11 @@ def load_processor(model_args, data_args=None):
         print("Processor load here for QWEN3-VL")
         from src.model.vlm_backbone.qwen3_vl_embedding.processing_qwen3_vl import Qwen3VLProcessor
         processor = Qwen3VLProcessor.from_pretrained(model_name_or_path, trust_remote_code=True, padding_side="right")
+        
+    elif model_args.model_backbone == SMOLVLM:
+        print("Processor load here for SmolVLM")
+        from transformers import AutoProcessor
+        processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True)
     else:
         from transformers import AutoProcessor
         processor = AutoProcessor.from_pretrained(
@@ -669,6 +680,181 @@ def Qwen3_VL_process_fn(model_inputs: dict, processor, max_length=None, instruct
     
     return result
 
+def SmolVLM_process_fn(model_inputs: dict, processor, max_length=None, instruction=None):
+    texts = model_inputs['text']
+    visual_inputs = model_inputs['images']
+
+    vlm_image_token = "<image>"
+    vlm_video_token = "<video>"
+
+    default_instruction = instruction or "Represent the user's input."
+
+    # Step 1: Build conversations in SmolVLM chat format
+    conversations = []
+    all_images_batch = []  # list of list[PIL.Image] per sample
+
+    for text, images in zip(texts, visual_inputs):
+        has_image = vlm_image_token in text
+        has_video = vlm_video_token in text
+        no_visual = images is None or (isinstance(images, list) and any(i is None for i in images))
+
+        content = []
+        sample_images = []
+
+        if no_visual or (not has_image and not has_video):
+            # Text-only
+            clean_text = text.replace(vlm_image_token, '').replace(vlm_video_token, '').strip()
+            if not clean_text:
+                clean_text = "NULL"
+            content.append({"type": "text", "text": clean_text})
+
+        elif has_image:
+            if isinstance(images, PIL.Image.Image):
+                images = [images]
+
+            # Resize small images
+            for iid, image in enumerate(images):
+                if image.size[0] < 28 or image.size[1] < 28:
+                    images[iid] = image.resize((56, 56))
+
+            # SmolVLM chat format: mỗi image là một {"type": "image"} entry
+            for img in images:
+                content.append({"type": "image"})
+                sample_images.append(img)
+
+            # Add text (strip image token placeholder)
+            clean_text = text.replace(vlm_image_token, '').strip()
+            if clean_text:
+                content.append({"type": "text", "text": clean_text})
+
+        elif has_video:
+            # Video: SmolVLM dùng {"type": "video"}
+            content.append({"type": "video"})
+
+            clean_text = text.replace(vlm_video_token, '').strip()
+            if clean_text:
+                content.append({"type": "text", "text": clean_text})
+
+            # Video frames as images
+            if isinstance(images, list):
+                sample_images = images
+            else:
+                sample_images = [images]
+
+        conversation = [
+            {"role": "system", "content": [{"type": "text", "text": default_instruction}]},
+            {"role": "user", "content": content},
+        ]
+        conversations.append(conversation)
+        all_images_batch.append(sample_images if sample_images else None)
+
+    # Step 2: Apply chat template to get formatted text
+    chat_texts = []
+    for conv in conversations:
+        prompt = processor.apply_chat_template(conv, add_generation_prompt=True)
+        chat_texts.append(prompt)
+
+    # Step 3: Process each sample individually (SmolVLM processor doesn't batch well with mixed visual/text)
+    input_ids_list = []
+    pixel_values_list = []
+    pixel_attention_mask_list = []
+    image_exists = False
+
+    for i, (chat_text, sample_images) in enumerate(zip(chat_texts, all_images_batch)):
+        has_images = sample_images is not None and len(sample_images) > 0
+
+        if has_images:
+            image_exists = True
+            inputs = processor(
+                text=chat_text,
+                images=sample_images,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_length or 8192,
+            )
+        else:
+            inputs = processor(
+                text=chat_text,
+                images=None,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_length or 8192,
+            )
+
+        input_id = inputs["input_ids"].squeeze(0).tolist()
+        if isinstance(input_id, int):
+            input_id = [input_id]
+        input_ids_list.append(input_id)
+        pixel_values_list.append(inputs.get("pixel_values", None))
+        pixel_attention_mask_list.append(inputs.get("pixel_attention_mask", None))
+
+    # Step 4: Pad input_ids
+    batch_encoding = processor.tokenizer.pad({"input_ids": input_ids_list}, return_tensors="pt")
+    input_ids_padded = batch_encoding["input_ids"]
+    attention_mask = batch_encoding["attention_mask"]
+
+    # Step 5: Pad pixel_values thành tensor (batch_size, max_num_images, C, H, W)
+    pixel_values = None
+    pixel_attention_mask = None
+
+    if image_exists:
+        max_num_images = 0
+        ref_shape = None
+        for pv in pixel_values_list:
+            if pv is not None:
+                if pv.dim() == 5:
+                    max_num_images = max(max_num_images, pv.shape[1])
+                    ref_shape = (pv.shape[2], pv.shape[3], pv.shape[4])  # C, H, W
+                elif pv.dim() == 4:
+                    max_num_images = max(max_num_images, pv.shape[0])
+                    ref_shape = (pv.shape[1], pv.shape[2], pv.shape[3])
+
+        if max_num_images > 0 and ref_shape is not None:
+            C, H, W = ref_shape
+            padded_pvs = []
+            padded_pams = []
+
+            for pv, pam in zip(pixel_values_list, pixel_attention_mask_list):
+                if pv is None:
+                    # Zero tensor cho text-only sample
+                    padded_pvs.append(torch.zeros(max_num_images, C, H, W))
+                    padded_pams.append(torch.zeros(max_num_images, H, W, dtype=torch.long))
+                else:
+                    if pv.dim() == 5:
+                        pv = pv.squeeze(0)
+                    if pam is not None and pam.dim() >= 4:
+                        pam = pam.squeeze(0) if pam.shape[0] == 1 else pam
+
+                    num_img = pv.shape[0]
+                    if num_img < max_num_images:
+                        pad_pv = torch.zeros(max_num_images - num_img, C, H, W, dtype=pv.dtype)
+                        pv = torch.cat([pv, pad_pv], dim=0)
+                        if pam is not None:
+                            pad_pam = torch.zeros(max_num_images - num_img, H, W, dtype=pam.dtype)
+                            pam = torch.cat([pam, pad_pam], dim=0)
+
+                    padded_pvs.append(pv)
+                    padded_pams.append(pam if pam is not None else torch.zeros(max_num_images, H, W, dtype=torch.long))
+
+            pixel_values = torch.stack(padded_pvs, dim=0)  # (B, max_num_images, C, H, W)
+            pixel_attention_mask = torch.stack(padded_pams, dim=0)
+
+    # Step 6: Build result
+    result = {
+        "input_ids": input_ids_padded.long(),
+        "attention_mask": attention_mask.long(),
+    }
+    if pixel_values is not None:
+        result["pixel_values"] = pixel_values
+    if pixel_attention_mask is not None:
+        result["pixel_attention_mask"] = pixel_attention_mask
+        
+    print(f"Processed batch with input_ids shape: {result['input_ids'].shape}")
+    print(f"Example input_ids: {result['input_ids'][0][:30]}")
+    print(f"Num token <image> in first input: {(result['input_ids'][0] == 49190).sum().item() if result['input_ids'][0] is not None else 'N/A'}")
+
+    return result
+
 def Gme_process_fn(model_inputs: dict, processor: Qwen2VLProcessor, max_length=None):
     inputs = {
         'texts': model_inputs['text'],
@@ -761,8 +947,9 @@ def Qwen2_VL_TokenSelection_process_fn(model_inputs: dict, processor: Qwen2VLTok
     inputs['video_grid_thw'] = video_grid_thw
     inputs['patch_pos'] = patch_pos
     inputs['select_mask'] = select_mask
-
+    
     return inputs
+
 
 
 def InternVL_process_fn(model_inputs: dict, processor, max_length=None):
@@ -950,4 +1137,5 @@ process_vlm_inputs_fns = {
     LLAVA_ONEVISION: Llava_ONEVISION_process_fn,
     LLAVA_QWEN2: FastVLM_process_fn,
     QWEN3_VL: Qwen3_VL_process_fn,
+    SMOLVLM: SmolVLM_process_fn,
 }

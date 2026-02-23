@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import math
 from typing import List, Dict, Tuple, Optional
+import random
 
 class ESELoss(nn.Module):
     def __init__(self, args):
@@ -15,6 +16,7 @@ class ESELoss(nn.Module):
         self.alpha = getattr(args, 'ese_alpha', 1.0)
         self.beta = getattr(args, 'ese_beta', 1.0)
         self.average_loss = getattr(args, 'average_loss', True)
+        self.n_layers_per_step = getattr(args, 'n_layers_per_step', 0)  # 0 = use all layers
         
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -47,175 +49,77 @@ class ESELoss(nn.Module):
         hidden_state = F.normalize(hidden_state, p=2, dim=-1)
         return hidden_state[row, eos_indices]
     
-    def _pool_hidden_layers(self, hidden_states, attention_mask) -> List[Tensor]:
-        transformers_layers = hidden_states[1:]
-        pooled = []
-        for h in transformers_layers:
-            pooled.append(self.eos_pooling(h, attention_mask))
-        return pooled
-        
-    def layer_weight(self, i : int) -> float:
-        # w_i = 1.0 / (1.0 + math.log(i)), i is 1-index of layer, starting from 1
-        return 1.0 /(1.0 + math.log(i))
-    
-    @torch.no_grad()
-    def pca_compress(self, embeddings: Tensor, k: int) -> Tensor:
+    def _matryoshka_contrastive_loss(
+        self,
+        emb1: Tensor,
+        emb2: Tensor,
+        target: Tensor,
+    ) -> Tuple[Tensor, Dict, Dict]:
         """
-        PCA-based compression using svd_lowrank (much faster than full SVD).
-        embeddings: (batch, d)
-        k: target dimension
-        Returns: (batch, k) — detached
-        """
-        d = embeddings.size(-1)
-        if k >= d:
-            return embeddings.detach()
+        EPRESSO-style Matryoshka contrastive loss for a single layer.
+        Applies InfoNCE across multiple nested embedding dimensions.
 
-        orig_dtype = embeddings.dtype
-        m = embeddings.float()
-        A = F.softmax(m.T @ m / (d ** 0.5), dim=-1)  # (d, d)
-        A = A.to(torch.float32)
-        u, s, _ = torch.svd_lowrank(A, q=k)           # u: (d, k), s: (k,)
-        topk_deps = u @ torch.diag(s)                  # (d, k)
-        result = m @ topk_deps                           # (batch, k)
-        return result.to(orig_dtype).detach()
-    
-    def align_loss(self, x: Tensor, y: Tensor) -> Tensor:
-        """align(x, y) = MSE(x, y) + KLDiv(x, y). y is detached soft label."""
-        # x_norm = F.normalize(x, p=2, dim=-1)
-        # y_norm = F.normalize(y, p=2, dim=-1)
-        mse = F.mse_loss(x, y)
-        log_p = F.log_softmax(x, dim=-1)
-        q = F.softmax(y, dim=-1)
-        kl = nn.KLDivLoss(reduction='batchmean')(log_p, q)
-        return mse + kl
-    
-    def _contrastive_loss_single_dim(self,
-                                     q_k: Tensor,
-                                     p_k: Tensor,
-                                     target: Tensor,
-                                     reduction: str = 'mean') -> Tensor:
-        """InfoNCE contrastive loss for a single dimension slice."""
-        logits = (q_k @ p_k.t()) / self.temperature
-        return F.cross_entropy(logits, target, reduction=reduction)
-    
-    def learn_to_express(self,
-                        layer_x: List[Tensor],
-                        layer_y: List[Tensor],
-                        target: Tensor,
-                        reduction: str = 'mean') -> Tensor:
+        Args:
+            emb1: [batch_size, full_dim] - query embeddings
+            emb2: [N, full_dim] - key embeddings (N >= batch_size when gathered)
+            target: [batch_size] - contrastive targets
+
+        Returns:
+            total_loss, loss_dict, acc_dict
         """
-        Eq. 2: L_le = Σ_{i=1}^{n-1} w_i * loss(X^k_i, G) + loss(X^k_n, G)
-        Applied to both k-dim sub-embeddings AND full-dim embeddings.
-        """
-        n = len(layer_x)
-        full_dim = layer_x[0].size(-1)
+        full_dim = emb1.size(-1)
+        device = emb1.device
+
+        # Filter valid dims (<= full_dim), always include full_dim
+        valid_dims = [d for d in self.nested_dims if d <= full_dim]
+        if full_dim not in valid_dims:
+            valid_dims.append(full_dim)
+
+        # Log-based weights per dimension (like EPRESSO)
+        dim_weights = [1.0 / (1.0 + math.log(i + 1)) for i in range(len(valid_dims))]
+
         total_loss = 0.0
-        n_terms = 0
+        loss_dict = {}
+        acc_dict = {}
 
-        # 1) Process nested k-dimensional sub-embeddings
-        for dim in self.nested_dims:
-            if dim >= full_dim:  # Skip if dim >= full_dim
-                continue
+        for idx, dim in enumerate(valid_dims):
+            w = dim_weights[idx]
 
-            dim_loss = 0.0
-            for i in range(n):
-                q_k = layer_x[i][:, :dim]
-                p_k = layer_y[i][:, :dim]
-                loss = self._contrastive_loss_single_dim(q_k, p_k, target, reduction)
+            # Slice to current dimension
+            q = emb1[:, :dim]
+            k = emb2[:, :dim]
 
-                if i < n - 1:
-                    w = self.layer_weight(i + 1)
-                    dim_loss += w * loss
-                else:
-                    dim_loss += loss
+            # Normalize embeddings
+            q = F.normalize(q, p=2, dim=-1)
+            k = F.normalize(k, p=2, dim=-1)
 
-            total_loss += dim_loss
-            n_terms += 1
+            # InfoNCE: similarity / temperature -> cross entropy
+            logits = (q @ k.t()) / self.temperature
+            loss = F.cross_entropy(logits, target)
 
-        # 2) Process FULL-dimensional embeddings (d-dim)
-        full_loss = 0.0
-        for i in range(n):
-            q_full = layer_x[i]  # Full dimension
-            p_full = layer_y[i]
-            loss = self._contrastive_loss_single_dim(q_full, p_full, target, reduction)
+            weighted_loss = w * loss
+            total_loss += weighted_loss
 
-            if i < n - 1:
-                w = self.layer_weight(i + 1)
-                full_loss += w * loss
-            else:
-                full_loss += loss
+            loss_dict[f"loss_dim_{dim}"] = loss.item()
+            loss_dict[f"weighted_loss_dim_{dim}"] = weighted_loss.item()
 
-        total_loss += full_loss
-        n_terms += 1
+            with torch.no_grad():
+                preds = logits.argmax(dim=-1)
+                acc = (preds == target).float().mean().item()
+                acc_dict[f"acc_dim_{dim}"] = acc
 
         # Average across all dimension levels
-        if self.average_loss and n_terms > 0:
-            total_loss = total_loss / n_terms
+        if self.average_loss and len(valid_dims) > 0:
+            total_loss = total_loss / len(valid_dims)
 
-        return total_loss / n
+        return total_loss, loss_dict, acc_dict
 
-    def learn_to_compress(self, layer_x: List[Tensor]) -> Tensor:
-        """
-        Eq. 6: L_lc = Σ_{i=1}^{n-1} w_i * align(X^k_i, X^k_i_pca) + align(X^k_n, X^k_n_pca)
-        Applied to both k-dim sub-embeddings AND full-dim embeddings.
-        """
-        n = len(layer_x)
-        full_dim = layer_x[0].size(-1)
-        total_loss = 0.0
-        n_terms = 0
-
-        # 1) Process nested k-dimensional compressions
-        for dim in self.nested_dims:
-            if dim >= full_dim:  # Skip if dim >= full_dim
-                continue
-
-            dim_loss = 0.0
-            for i in range(n):
-                emb = layer_x[i]
-                X_k_pca = self.pca_compress(emb, dim)
-                X_k_trunc = emb[:, :dim]
-                a_loss = self.align_loss(X_k_trunc, X_k_pca)
-
-                if i < n - 1:
-                    w = self.layer_weight(i + 1)
-                    dim_loss += w * a_loss
-                else:
-                    dim_loss += a_loss
-
-            total_loss += dim_loss
-            n_terms += 1
-
-        # 2) Process FULL-dimensional compression (d-dim)
-        # Align full embedding with its PCA reconstruction
-        full_loss = 0.0
-        for i in range(n):
-            emb = layer_x[i]
-            X_full_pca = self.pca_compress(emb, full_dim)
-            a_loss = self.align_loss(emb, X_full_pca)
-
-            if i < n - 1:
-                w = self.layer_weight(i + 1)
-                full_loss += w * a_loss
-            else:
-                full_loss += a_loss
-
-        total_loss += full_loss
-        n_terms += 1
-
-        # Average across all dimension levels
-        if self.average_loss and n_terms > 0:
-            total_loss = total_loss / n_terms
-
-        return total_loss / n
-    
     def forward(self, model_trainer, input_data):
         """
-        L = α * L_le + β * L_lc
-        
-        Args:
-            layer_x: list of n tensors (batch, d) — query embeddings per layer
-            layer_y: list of n tensors (batch, d) — positive embeddings per layer
-            target: (batch,) contrastive targets. Auto-generated if None.
+        EPRESSO-style loss: Matryoshka dimensions × layers.
+
+        Final layer: full Matryoshka contrastive loss (weight = 1.0)
+        Intermediate layers: optionally sampled, weighted by 1/(1+log(distance_from_top))
         """
         qry_input = input_data['qry']
         pos_input = input_data['pos']
@@ -227,32 +131,73 @@ class ESELoss(nn.Module):
 
         qry_reps, _, _, qry_hidden_states = qry_output
         pos_reps, _, _, pos_hidden_states = pos_output
-        
+
         qry_attn_mask = qry_input.get('attention_mask', None)
         pos_attn_mask = pos_input.get('attention_mask', None)
 
-        layer_x = self._pool_hidden_layers(qry_hidden_states, qry_attn_mask)
-        layer_y = self._pool_hidden_layers(pos_hidden_states, pos_attn_mask)
+        # hidden_states: [0]=embedding layer, [1:]=transformer layers
+        num_layers = len(qry_hidden_states)
 
-        # Gather layer embeddings across GPUs
-        if self.world_size > 1:
-            layer_x = [self._dist_gather_tensor(lx) for lx in layer_x]
-            layer_y = [self._dist_gather_tensor(ly) for ly in layer_y]
+        # ---- Helper: pool + gather ----
+        def pool_and_gather(hidden_state, attn_mask):
+            emb = self.eos_pooling(hidden_state, attn_mask)
+            if self.world_size > 1:
+                emb = self._dist_gather_tensor(emb)
+            return emb
 
-        # ---- ESE target ----
-        bs = layer_x[0].size(0)
-        target_per_qry = layer_y[0].size(0) // bs
-        ese_target = torch.arange(
+        # ---- Pool final layer & build contrastive target ----
+        final_q = pool_and_gather(qry_hidden_states[-1], qry_attn_mask)
+        final_p = pool_and_gather(pos_hidden_states[-1], pos_attn_mask)
+
+        bs = final_q.size(0)
+        target_per_qry = final_p.size(0) // bs
+        target = torch.arange(
             0, bs * target_per_qry, target_per_qry,
-            device=layer_x[0].device, dtype=torch.long
+            device=final_q.device, dtype=torch.long,
         )
 
-        # ---- ESE losses ----
-        l_le = self.learn_to_express(layer_x, layer_y, ese_target)
-        l_lc = self.learn_to_compress(layer_x)
-        ese_loss = self.alpha * l_le + self.beta * l_lc
+        # ========== Final layer: full Matryoshka loss (weight=1.0) ==========
+        total_loss, final_loss_dict, final_acc_dict = self._matryoshka_contrastive_loss(
+            final_q, final_p, target,
+        )
+        all_metrics = {}
+        all_metrics.update(final_loss_dict)
+        all_metrics.update(final_acc_dict)
+
+        # ========== Intermediate layers ==========
+        if num_layers > 2:
+            # Exclude embedding layer [0] and final layer [-1]
+            layer_indices = list(range(1, num_layers - 1))
+
+            # Optionally sample a subset of intermediate layers
+            if 0 < self.n_layers_per_step < len(layer_indices):
+                layer_indices = random.sample(layer_indices, self.n_layers_per_step)
+
+            for layer_idx in layer_indices:
+                layer_q = pool_and_gather(qry_hidden_states[layer_idx], qry_attn_mask)
+                layer_p = pool_and_gather(pos_hidden_states[layer_idx], pos_attn_mask)
+
+                layer_loss, layer_ld, layer_ad = self._matryoshka_contrastive_loss(
+                    layer_q, layer_p, target,
+                )
+
+                # Deeper layers (closer to final) get higher weight
+                layer_weight = 1.0 / (1.0 + math.log(num_layers - layer_idx))
+                total_loss += layer_weight * layer_loss
+
+                for k, v in layer_ld.items():
+                    all_metrics[f"layer{layer_idx}_{k}"] = v
+                for k, v in layer_ad.items():
+                    all_metrics[f"layer{layer_idx}_{k}"] = v
+                    
+                del layer_q, layer_p, layer_loss
+                    
+        del qry_output, pos_output, qry_reps, pos_reps
+        del qry_hidden_states, pos_hidden_states, final_q, final_p
+        torch.cuda.empty_cache()
 
         return {
-            'loss': ese_loss,
-            'contrastive_loss': ese_loss,
+            'loss': total_loss,
+            'contrastive_loss': total_loss,
+            **all_metrics,
         }

@@ -117,6 +117,7 @@ class TrainingArguments(TrainingArguments):
         metadata={"help": "List of split layers for student; number of elements equals number of projectors"}   
     )
     w_cross_modal_loss: float = field(default=1.0, metadata={"help": "weight for cross modal loss"})
+    nested_dims: List[int] = field(default_factory=list, metadata={"help": "List of dimensions for matryoshka evaluation, e.g. [64, 128, 256]"})
 @dataclass
 class MTEBArguments:
     device: str = field(default="cuda", metadata={"help": "use cuda for single GPU inference, if multiple GPUs are available it will use DP automatically"})

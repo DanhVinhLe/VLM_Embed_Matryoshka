@@ -1,0 +1,18 @@
+python eval_mmeb.py \
+    --model_name /workspace/ComfyUI/models/pulid/VLM_Embed/training/MRL_Qwen3_vqa/checkpoint-epoch-0 \
+    --encode_output_path ./MMEB-evaloutputs/qwen3-vl-2b-mrl-v1/ \
+    --lora \
+    --lora_r 16 \
+    --lora_alpha 64 \
+    --pooling eos \
+    --model_backbone qwen3_vl \
+    --normalize True \
+    --bf16 \
+    --dataset_name TIGER-Lab/MMEB-eval \
+    --subset_name  "OK-VQA" "A-OKVQA" "DocVQA" "InfographicsVQA" "ChartQA" "Visual7W" \
+    --dataset_split test \
+    --per_device_eval_batch_size 16 \
+    --image_resolution mid \
+    --image_dir /workspace/ComfyUI/models/gligen/VLM_Embed/eval_images \
+    --tgt_prefix_mod \
+    --nested_dims 64 128 256 512 768 1024 2048

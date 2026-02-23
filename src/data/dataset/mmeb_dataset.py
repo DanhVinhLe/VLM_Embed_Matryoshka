@@ -34,7 +34,10 @@ def process_image(image, resolution, max_dim=1344):
         max_dim = 448
     cur_max_dim = max(image.size)
     if cur_max_dim > max_dim:
-        image = image.resize((max_dim, max_dim))
+        scale = max_dim / cur_max_dim
+        new_width = int(image.size[0] * scale)
+        new_height = int(image.size[1] * scale)
+        image = image.resize((new_width, new_height))
     return image
 
 

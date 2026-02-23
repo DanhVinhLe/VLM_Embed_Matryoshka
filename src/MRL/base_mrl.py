@@ -70,7 +70,7 @@ class MatryoshkaContrastiveLoss(nn.Module):
             loss = self.cross_entropy(scores / self.model_trainer.temperature, target)
             total_loss += loss
             num_dims += 1
-            dim_losses[f"contrastive_loss_dim_{dim}"] = loss.item()
+            dim_losses[f"contrastive_loss_dim_{dim}"] = loss.detach().item()
 
         if self.average_loss and num_dims > 0:
             total_loss = total_loss / num_dims

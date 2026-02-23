@@ -25,3 +25,4 @@ hnswlib
 einops
 deepspeed==0.17.6
 numba
+num2words==0.5.14
