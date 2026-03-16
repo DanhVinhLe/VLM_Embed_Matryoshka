@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset, RandomSampler
 from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
 from src.utils import print_rank, print_master
 from src.arguments import ModelArguments, DataArguments, TrainingArguments
+from src.MRL.adaptive_matryoshka import AdaptiveDimensionRouter
 from peft import LoraConfig, get_peft_model, PeftModel 
 from transformers import ProcessorMixin
 from qwen_vl_utils import smart_resize
@@ -80,7 +81,33 @@ class OneModelTrainer(nn.Module):
         self.device = device
         self.model = self._load_model()
         self.temperature = model_args.temperature
+        self._maybe_attach_router_head()
     
+    def _maybe_attach_router_head(self):
+        """Attach a trainable router head directly on the model for Stage-2 training."""
+        if getattr(self.training_args, "kd_loss_type", "") != "adaptive_router":
+            return
+
+        nested_dims = getattr(self.training_args, "nested_dims", None) or [64, 256, 512, 1024]
+        hidden_dim = int(getattr(self.training_args, "router_hidden_dim", 256))
+        full_dim = getattr(self.model.encoder.config, "hidden_size", None)
+        if full_dim is None:
+            full_dim = getattr(self.model.encoder.config, "text_config", None)
+            full_dim = getattr(full_dim, "hidden_size", 1024)
+
+        dim_levels = sorted([d for d in nested_dims if d <= int(full_dim)])
+        if not dim_levels:
+            dim_levels = [int(full_dim)]
+
+        self.model.router_head = AdaptiveDimensionRouter(
+            input_dim=int(full_dim),
+            dim_levels=dim_levels,
+            hidden_dim=hidden_dim,
+        ).to(self.device)
+        print_rank(
+            f"Attached router head: input_dim={full_dim}, dim_levels={dim_levels}, hidden_dim={hidden_dim}"
+        )
+
     def _load_model(self):
         if self.model_args.lora:
             print("Load model with lora rank:", self.model_args.lora_r)
