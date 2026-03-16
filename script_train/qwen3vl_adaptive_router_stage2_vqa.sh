@@ -1,0 +1,35 @@
+torchrun \
+    --standalone \
+    --nproc_per_node=1 \
+    --master_port=29501 \
+    train_ddp_one_model.py \
+    --lora \
+    --lora_r 16 \
+    --lora_alpha 64 \
+    --model_name Qwen/Qwen3-VL-Embedding-2B \
+    --model_backbone qwen3_vl \
+    --bf16 \
+    --pooling eos \
+    --normalize True \
+    --temperature 0.02 \
+    --dataset_name TIGER-Lab/MMEB-train \
+    --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
+    --dataset_split original \
+    --image_dir /workspace/ComfyUI/models/gligen/VLM_Embed/vlm2vec_train/MMEB-train \
+    --output_dir training/AdaptiveMRL_Qwen3_stage2_router \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 1 \
+    --learning_rate 1e-5 \
+    --num_train_epochs 1 \
+    --save_total_limit 2 \
+    --logging_steps 1 \
+    --save_strategy epoch \
+    --seed 42 \
+    --weight_decay 0.01 \
+    --warmup_ratio 0.03 \
+    --image_resolution mid \
+    --kd_loss_type adaptive_router \
+    --nested_dims 64 256 512 1024 \
+    --router_alpha 0.01 \
+    --router_hidden_dim 256 \
+    --router_accuracy_threshold 0.9
