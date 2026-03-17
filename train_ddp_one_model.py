@@ -75,7 +75,7 @@ def to_device(obj, device):
 
 def ddp_setup():
     torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
-    init_process_group(backend="nccl")
+    init_process_group(backend="gloo")
 
 class Trainer:
     def __init__(self, trainer, train_data, optimizer, lr_scheduler, criterion, model_args, training_args):
