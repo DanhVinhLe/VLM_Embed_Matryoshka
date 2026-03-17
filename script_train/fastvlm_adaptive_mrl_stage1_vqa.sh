@@ -1,0 +1,34 @@
+torchrun \
+    --standalone \
+    --nproc_per_node=1 \
+    --master_port=29510 \
+    train_ddp_one_model.py \
+    --lora \
+    --lora_r 64 \
+    --lora_alpha 128 \
+    --model_name apple/FastVLM-0.5B \
+    --model_backbone llava_qwen2 \
+    --bf16 \
+    --pooling eos \
+    --normalize True \
+    --temperature 0.02 \
+    --dataset_name TIGER-Lab/MMEB-train \
+    --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
+    --dataset_split original \
+    --image_dir /workspace/ComfyUI/models/gligen/VLM_Embed/vlm2vec_train/MMEB-train \
+    --output_dir training/AdaptiveMRL_fastVLM_stage1 \
+    --per_device_train_batch_size 64 \
+    --gradient_accumulation_steps 1 \
+    --learning_rate 5e-5 \
+    --num_train_epochs 2 \
+    --save_total_limit 5 \
+    --logging_steps 1 \
+    --save_strategy epoch \
+    --seed 42 \
+    --weight_decay 0.01 \
+    --warmup_ratio 0.03 \
+    --image_resolution high \
+    --kd_loss_type adaptive_mrl_stage1 \
+    --nested_dims 64 256 512 768 \
+    --stage1_phase all \
+    --distill_lambda 0.5

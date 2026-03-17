@@ -118,6 +118,26 @@ class TrainingArguments(TrainingArguments):
     )
     w_cross_modal_loss: float = field(default=1.0, metadata={"help": "weight for cross modal loss"})
     nested_dims: List[int] = field(default_factory=list, metadata={"help": "List of dimensions for matryoshka evaluation, e.g. [64, 128, 256]"})
+    stage1_phase: str = field(
+        default="all",
+        metadata={"help": "Adaptive Matryoshka Stage-1 curriculum phase: A/B/C/D/all."},
+    )
+    distill_lambda: float = field(
+        default=0.5,
+        metadata={"help": "Distillation weight used in Adaptive Matryoshka Stage-1."},
+    )
+    router_alpha: float = field(
+        default=0.01,
+        metadata={"help": "Compute penalty weight for Adaptive Matryoshka Stage-2 router training."},
+    )
+    router_hidden_dim: int = field(
+        default=256,
+        metadata={"help": "Hidden size of the MLP router for adaptive dimension prediction."},
+    )
+    router_accuracy_threshold: float = field(
+        default=0.9,
+        metadata={"help": "Minimum retrieval score/accuracy threshold used to build router labels."},
+    )
 @dataclass
 class MTEBArguments:
     device: str = field(default="cuda", metadata={"help": "use cuda for single GPU inference, if multiple GPUs are available it will use DP automatically"})
