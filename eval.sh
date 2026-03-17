@@ -1,15 +1,15 @@
 python eval_mmeb.py \
-    --model_name HuggingFaceTB/SmolVLM-256M-Instruct \
-    --encode_output_path ./MMEB-evaloutputs/SmolVLM/ \
+    --model_name training/AdaptiveMRL_fastVLM_stage1/checkpoint-epoch-1 \
+    --encode_output_path ./MMEB-evaloutputs/fastvlm_stage1/ \
     --pooling eos \
-    --model_backbone idefics3 \
+    --model_backbone llava_qwen2 \
     --normalize True \
     --bf16 \
     --dataset_name TIGER-Lab/MMEB-eval \
-    --subset_name  ImageNet-1K HatefulMemes SUN397 N24News VOC2007 \
+    --subset_name  OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
     --dataset_split test \
     --per_device_eval_batch_size 16 \
     --image_resolution mid \
-    --image_dir /workspace/ComfyUI/models/gligen/VLM_Embed/eval_images \
+    --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/eval_images" \
     --tgt_prefix_mod \
-    --nested_dims 64 128 256 512 768 1024
+    --nested_dims 64 256 512 768
