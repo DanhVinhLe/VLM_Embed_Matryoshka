@@ -120,7 +120,7 @@ class TrainingArguments(TrainingArguments):
     nested_dims: List[int] = field(default_factory=list, metadata={"help": "List of dimensions for matryoshka evaluation, e.g. [64, 128, 256]"})
     stage1_phase: str = field(
         default="all",
-        metadata={"help": "Adaptive Matryoshka Stage-1 curriculum phase: A/B/C/D/all."},
+        metadata={"help": "Adaptive Matryoshka Stage-1 curriculum stage selector: ALL, comma-separated indices (e.g. 0,2), or labels (A,B,C,...) mapped to nested_dims order."},
     )
     distill_lambda: float = field(
         default=0.5,
