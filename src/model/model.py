@@ -46,6 +46,20 @@ class MMEBModel(nn.Module):
             self.process_rank = dist.get_rank()
             self.world_size = dist.get_world_size()
 
+    def _extract_last_hidden_state(self, model_output):
+        last_hidden_state = getattr(model_output, "last_hidden_state", None)
+        if last_hidden_state is not None:
+            return last_hidden_state
+
+        hidden_states = getattr(model_output, "hidden_states", None)
+        if hidden_states is not None and len(hidden_states) > 0:
+            return hidden_states[-1]
+
+        raise AttributeError(
+            "Model output does not contain `last_hidden_state` or `hidden_states`. "
+            "Enable `output_hidden_states=True` for this backbone."
+        )
+
     def encode_input(self, input, output_hidden_states: bool = False, output_attentions: bool = False):
         INTERNVIDEO2 = "internvideo2"
         if getattr(self, "model_backbone", None) == INTERNVIDEO2:
@@ -118,33 +132,36 @@ class MMEBModel(nn.Module):
             if hasattr(input, 'pixel_values'):
                 input['pixel_values'] = input['pixel_values'].squeeze(1)
                 input['image_sizes'] = input['image_sizes'].squeeze(1)
-            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=output_hidden_states, output_attentions=output_attentions)
+            request_hidden_states = output_hidden_states or getattr(self, "model_backbone", None) in [LLAVA_NEXT, LLAVA_ONEVISION, LLAVA_QWEN2, QWEN2_VL, SMOLVLM]
+            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=request_hidden_states, output_attentions=output_attentions)
             # add for image feature
             if hasattr(hidden_states, 'batch_image_embeds'):
                 image_features = hidden_states.batch_image_embeds
             else: 
                 image_features = None
             output_hidden_states = hidden_states.hidden_states if output_hidden_states else None
-            last_hidden_state = hidden_states.hidden_states[-1] if output_hidden_states else hidden_states.last_hidden_state
+            last_hidden_state = self._extract_last_hidden_state(hidden_states)
             attention_matrix = hidden_states.attentions if hasattr(hidden_states, 'attentions') else None
             pooled_output = self._pooling(last_hidden_state, input['attention_mask'])
             print("len image features:", None if image_features is None else image_features.shape)
             return pooled_output, image_features, attention_matrix, output_hidden_states
         elif getattr(self, "model_backbone", None) in [LLAVA_QWEN2, QWEN2_VL]:
             # print("Encoding input for FastVLM model backbone")
-            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=output_hidden_states, output_attentions=output_attentions)
+            request_hidden_states = output_hidden_states or getattr(self, "model_backbone", None) in [LLAVA_NEXT, LLAVA_ONEVISION, LLAVA_QWEN2, QWEN2_VL, SMOLVLM]
+            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=request_hidden_states, output_attentions=output_attentions)
             if hasattr(hidden_states, 'batch_image_embeds'):
                 image_features = hidden_states.batch_image_embeds
             else: 
                 image_features = None
             output_hidden_states = hidden_states.hidden_states if output_hidden_states else None
-            last_hidden_state = hidden_states.hidden_states[-1] if output_hidden_states else hidden_states.last_hidden_state
+            last_hidden_state = self._extract_last_hidden_state(hidden_states)
             attention_matrix = hidden_states.attentions if hasattr(hidden_states, 'attentions') else None
             pooled_output = self._pooling(last_hidden_state, input['attention_mask'])
 
             return pooled_output, image_features, attention_matrix, output_hidden_states
         elif getattr(self, "model_backbone", None) in [QWEN3_VL]:
-            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=output_hidden_states, output_attentions=output_attentions)
+            request_hidden_states = output_hidden_states or getattr(self, "model_backbone", None) in [LLAVA_NEXT, LLAVA_ONEVISION, LLAVA_QWEN2, QWEN2_VL, SMOLVLM]
+            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=request_hidden_states, output_attentions=output_attentions)
             output_hidden_states = hidden_states.hidden_states if output_hidden_states else None
             
             attention_matrix = hidden_states.attentions if hasattr(hidden_states, 'attentions') else None
@@ -154,9 +171,10 @@ class MMEBModel(nn.Module):
             # print("last_hidden_state shape:", last_hidden_state.shape)
             return pooled_output, None, attention_matrix, output_hidden_states
         elif getattr(self, "model_backbone", None) == SMOLVLM:
-            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=output_hidden_states, output_attentions=output_attentions)
+            request_hidden_states = output_hidden_states or getattr(self, "model_backbone", None) in [LLAVA_NEXT, LLAVA_ONEVISION, LLAVA_QWEN2, QWEN2_VL, SMOLVLM]
+            hidden_states = self.encoder(**input, return_dict=True, output_hidden_states=request_hidden_states, output_attentions=output_attentions)
             output_hidden_states = hidden_states.hidden_states if output_hidden_states else None
-            last_hidden_state = hidden_states.hidden_states[-1] if output_hidden_states else hidden_states.last_hidden_state
+            last_hidden_state = self._extract_last_hidden_state(hidden_states)
             attention_matrix = hidden_states.attentions if hasattr(hidden_states, 'attentions') else None
             pooled_output = self._pooling(last_hidden_state, input['attention_mask'])
             image_features = hidden_states.image_hidden_states if hasattr(hidden_states, 'image_hidden_states') else None
@@ -171,7 +189,7 @@ class MMEBModel(nn.Module):
             else: 
                 image_features = None
             output_hidden_states = hidden_states.hidden_states if output_hidden_states else None
-            last_hidden_state = hidden_states.hidden_states[-1] if output_hidden_states else hidden_states.last_hidden_state
+            last_hidden_state = self._extract_last_hidden_state(hidden_states)
             attention_matrix = hidden_states.attentions if hasattr(hidden_states, 'attentions') else None
             pooled_output = self._pooling(last_hidden_state, input['attention_mask'])
 
