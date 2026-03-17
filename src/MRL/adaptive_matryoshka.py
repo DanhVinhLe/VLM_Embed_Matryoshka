@@ -30,7 +30,7 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         super().__init__()
         self.args = args
         self.temperature = getattr(args, "temperature", 0.02)
-        nested_dims = getattr(args, "nested_dims", None) or [64, 256, 512, 1024]
+        nested_dims = getattr(args, "nested_dims", None) or [64, 256, 512, 768, 1024]
         self.nested_dims = sorted(set(nested_dims))
         self.phase = str(getattr(args, "stage1_phase", "all")).upper()
         self.distill_lambda = float(getattr(args, "distill_lambda", 0.5))
@@ -151,24 +151,13 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         valid_dims = self._resolve_dims(full_dim)
         target = self._build_contrastive_target(qry_full, pos_full)
 
-        # Prefer canonical adaptive chain while still honoring current backbone width.
-        # Each tuple is (student_dim, teacher_dim_or_None).
-        requested_chain: List[Tuple[int, int | None]] = [
-            (1024, None),
-            (512, 1024),
-            (256, 512),
-            (64, 256),
-        ]
-        stage_pairs: List[Tuple[int, int | None]] = []
-        for s_dim, t_dim in requested_chain:
-            if s_dim in valid_dims:
-                if t_dim is None or t_dim in valid_dims:
-                    stage_pairs.append((s_dim, t_dim))
-
-        if not stage_pairs:
-            # Fallback for narrow emb dims.
-            max_dim = max(valid_dims)
-            stage_pairs = [(max_dim, None)]
+        # Build backbone-aware curriculum chain with full embedding dim as the first stage.
+        # stage_pairs entries: (student_dim, teacher_dim_or_None)
+        desc_dims = sorted(valid_dims, reverse=True)
+        stage_pairs: List[Tuple[int, Optional[int]]] = []
+        for idx, student_dim in enumerate(desc_dims):
+            teacher_dim = None if idx == 0 else desc_dims[idx - 1]
+            stage_pairs.append((student_dim, teacher_dim))
 
         phase_map = {
             "A": [0],
@@ -266,7 +255,7 @@ class AdaptiveRouterLoss(nn.Module):
         super().__init__()
         self.args = args
         self.temperature = getattr(args, "temperature", 0.02)
-        self.dim_levels = sorted(getattr(args, "nested_dims", None) or [64, 256, 512, 1024])
+        self.dim_levels = sorted(getattr(args, "nested_dims", None) or [64, 256, 512, 768, 1024])
         self.alpha = float(getattr(args, "router_alpha", 0.01))
         self.threshold = float(getattr(args, "router_accuracy_threshold", 0.9))
         self.router_hidden_dim = int(getattr(args, "router_hidden_dim", 256))

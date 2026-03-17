@@ -88,7 +88,7 @@ class OneModelTrainer(nn.Module):
         if getattr(self.training_args, "kd_loss_type", "") != "adaptive_router":
             return
 
-        nested_dims = getattr(self.training_args, "nested_dims", None) or [64, 256, 512, 1024]
+        nested_dims = getattr(self.training_args, "nested_dims", None) or [64, 256, 512, 768, 1024]
         hidden_dim = int(getattr(self.training_args, "router_hidden_dim", 256))
         full_dim = getattr(self.model.encoder.config, "hidden_size", None)
         if full_dim is None:
