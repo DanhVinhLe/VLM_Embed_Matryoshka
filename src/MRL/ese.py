@@ -126,8 +126,8 @@ class ESELoss(nn.Module):
         model = model_trainer.model
 
         # ---- Forward ----
-        qry_output = model.encode_input(qry_input)
-        pos_output = model.encode_input(pos_input)
+        qry_output = model.encode_input(qry_input, output_hidden_states=True, output_attentions=False)
+        pos_output = model.encode_input(pos_input, output_hidden_states=True, output_attentions=False)
 
         qry_reps, _, _, qry_hidden_states = qry_output
         pos_reps, _, _, pos_hidden_states = pos_output

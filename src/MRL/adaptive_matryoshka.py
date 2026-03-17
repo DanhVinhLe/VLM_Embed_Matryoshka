@@ -135,6 +135,45 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             valid_dims.append(full_dim)
         return sorted(set(valid_dims))
 
+    def _resolve_selected_stage_ids(self, stage_pairs: List[Tuple[int, Optional[int]]]) -> List[int]:
+        """
+        Resolve user-selected curriculum stages.
+
+        Backward compatibility:
+          - "A/B/C/D" still maps to stage indices 0/1/2/3.
+        Generalized behavior:
+          - Any single alphabetic token maps to an index (A=0, B=1, ... Z=25).
+          - Comma-separated lists are supported, e.g. "A,C" or "0,2,4".
+          - "ALL" means include every available stage built from nested_dims.
+
+        If selection is empty or invalid, defaults to [0] (largest/full dimension stage).
+        """
+        max_idx = len(stage_pairs) - 1
+        phase = self.phase.strip().upper()
+
+        if phase == "ALL":
+            return list(range(len(stage_pairs)))
+
+        tokens = [tok.strip() for tok in phase.replace(";", ",").split(",") if tok.strip()]
+        selected_ids: List[int] = []
+        for token in tokens:
+            if token.isdigit():
+                selected_ids.append(int(token))
+                continue
+
+            if token.isalpha():
+                # Support arbitrary alphabetic stage labels beyond D.
+                if len(token) == 1:
+                    selected_ids.append(ord(token) - ord("A"))
+                else:
+                    # Accept labels like "PHASE_E" by reading the trailing letter.
+                    last_char = token[-1]
+                    if "A" <= last_char <= "Z":
+                        selected_ids.append(ord(last_char) - ord("A"))
+
+        selected_ids = sorted({idx for idx in selected_ids if 0 <= idx <= max_idx})
+        return selected_ids or [0]
+
     def forward(self, model_trainer, input_data: Dict[str, Dict[str, Tensor]]) -> Dict[str, Tensor]:
         model = model_trainer.model
         qry_input = input_data["qry"]
@@ -159,17 +198,7 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             teacher_dim = None if idx == 0 else desc_dims[idx - 1]
             stage_pairs.append((student_dim, teacher_dim))
 
-        phase_map = {
-            "A": [0],
-            "B": [1],
-            "C": [2],
-            "D": [3],
-            "ALL": list(range(len(stage_pairs))),
-        }
-        selected_ids = phase_map.get(self.phase, phase_map["ALL"])
-        selected_ids = [i for i in selected_ids if i < len(stage_pairs)]
-        if not selected_ids:
-            selected_ids = [0]
+        selected_ids = self._resolve_selected_stage_ids(stage_pairs)
 
         losses = []
         align_losses = []

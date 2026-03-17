@@ -272,7 +272,11 @@ def load_processor(model_args, data_args=None):
     elif model_args.model_backbone == QWEN3_VL:
         print("Processor load here for QWEN3-VL")
         from src.model.vlm_backbone.qwen3_vl_embedding.processing_qwen3_vl import Qwen3VLProcessor
-        processor = Qwen3VLProcessor.from_pretrained(model_name_or_path, trust_remote_code=True, padding_side="right")
+        processor_kwargs = {"trust_remote_code": True, "padding_side": "right"}
+        if data_args is not None:
+            processor_kwargs["max_pixels"] = data_args.resize_max_pixels
+            processor_kwargs["min_pixels"] = data_args.resize_min_pixels
+        processor = Qwen3VLProcessor.from_pretrained(model_name_or_path, **processor_kwargs)
         
     elif model_args.model_backbone == SMOLVLM:
         print("Processor load here for SmolVLM")
@@ -656,7 +660,7 @@ def Qwen3_VL_process_fn(model_inputs: dict, processor, max_length=None, instruct
         videos=videos,
         video_metadata=video_metadata,
         truncation=True,
-        max_length=max_length or 8192,
+        max_length=max_length or 2048,
         padding=True,
         do_resize=False,
         return_tensors='pt',
