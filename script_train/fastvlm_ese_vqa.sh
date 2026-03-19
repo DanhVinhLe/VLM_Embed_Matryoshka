@@ -15,7 +15,7 @@ torchrun \
     --dataset_name "TIGER-Lab/MMEB-train" \
     --subset_name "OK-VQA" "A-OKVQA" "DocVQA" "InfographicsVQA" "ChartQA" "Visual7W" \
     --dataset_split "original" \
-    --image_dir "/workspace/ComfyUI/models/gligen/VLM_Embed/vlm2vec_train/MMEB-train" \
+    --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
     --output_dir "training/MRL_fastVLM_vqa" \
     --per_device_train_batch_size 64 \
     --gradient_accumulation_steps 1 \
@@ -30,5 +30,5 @@ torchrun \
     --weight_decay 0.01 \
     --kd_loss_type ese \
     --warmup_ratio 0.03 \
-    --image_resolution high \
+    --image_resolution mid \
     --nested_dims 64 128 256 512 768 896
