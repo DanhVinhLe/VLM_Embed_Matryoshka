@@ -34,6 +34,10 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         self.nested_dims = sorted(set(nested_dims))
         self.phase = str(getattr(args, "stage1_phase", "all")).upper()
         self.distill_lambda = float(getattr(args, "distill_lambda", 0.5))
+        self.align_l1_weight = float(getattr(args, "align_l1_weight", 1.0))
+        self.full_dim_l1_weight = float(getattr(args, "full_dim_l1_weight", 0.0))
+        self.dim_align_l1_weights = self._parse_dim_weight_map(getattr(args, "align_l1_weights", ""))
+        self.dim_kl_weights = self._parse_dim_weight_map(getattr(args, "kl_weights", ""))
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -135,6 +139,30 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             valid_dims.append(full_dim)
         return sorted(set(valid_dims))
 
+    def _parse_dim_weight_map(self, spec) -> Dict[int, float]:
+        """
+        Parse per-dimension weight spec.
+
+        Accepted format: "64:0.5,256:1.0,512:1.2"
+        """
+        if not spec:
+            return {}
+        if isinstance(spec, dict):
+            return {int(k): float(v) for k, v in spec.items()}
+
+        out: Dict[int, float] = {}
+        for item in str(spec).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" not in item:
+                raise ValueError(
+                    f"Invalid dim weight entry '{item}'. Expected format like '64:0.5,256:1.0'."
+                )
+            dim_str, weight_str = item.split(":", 1)
+            out[int(dim_str.strip())] = float(weight_str.strip())
+        return out
+
     def _resolve_selected_stage_ids(self, stage_pairs: List[Tuple[int, Optional[int]]]) -> List[int]:
         """
         Resolve user-selected curriculum stages.
@@ -218,23 +246,32 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
                 dim=student_dim,
                 bigger_dim=teacher_dim,
             )
-            align_loss = align_ce + align_l1
 
             if teacher_dim is None:
-                total = align_loss
-                distill_loss = torch.zeros_like(align_loss)
+                l1_weight = self.dim_align_l1_weights.get(student_dim, self.full_dim_l1_weight)
+            else:
+                l1_weight = self.dim_align_l1_weights.get(student_dim, self.align_l1_weight)
+            weighted_align_loss = align_ce + l1_weight * align_l1
+
+            if teacher_dim is None:
+                total = weighted_align_loss
+                distill_loss = torch.zeros_like(weighted_align_loss)
+                kl_weight = 0.0
             else:
                 teacher_logits = logits_cache[teacher_dim].detach()
                 distill_loss = self._distill_kl(student_logits, teacher_logits)
-                total = align_loss + self.distill_lambda * distill_loss
+                kl_weight = self.dim_kl_weights.get(student_dim, self.distill_lambda)
+                total = weighted_align_loss + kl_weight * distill_loss
 
             metrics[f"align_ce_dim_{student_dim}"] = align_ce.detach()
             metrics[f"align_l1_dim_{student_dim}"] = align_l1.detach()
-            metrics[f"align_loss_dim_{student_dim}"] = align_loss.detach()
+            metrics[f"align_l1_weight_dim_{student_dim}"] = torch.tensor(l1_weight, device=align_ce.device)
+            metrics[f"align_loss_dim_{student_dim}"] = weighted_align_loss.detach()
             if teacher_dim is not None:
                 metrics[f"distill_loss_{student_dim}_from_{teacher_dim}"] = distill_loss.detach()
+                metrics[f"kl_weight_dim_{student_dim}"] = torch.tensor(kl_weight, device=align_ce.device)
             losses.append(total)
-            align_losses.append(align_loss)
+            align_losses.append(weighted_align_loss)
             distill_losses.append(distill_loss)
 
         final_loss = torch.stack(losses).mean()

@@ -126,6 +126,22 @@ class TrainingArguments(TrainingArguments):
         default=0.5,
         metadata={"help": "Distillation weight used in Adaptive Matryoshka Stage-1."},
     )
+    align_l1_weight: float = field(
+        default=1.0,
+        metadata={"help": "Default weight for align L1 consistency term in Adaptive Matryoshka Stage-1 non-full-dim stages."},
+    )
+    full_dim_l1_weight: float = field(
+        default=0.0,
+        metadata={"help": "Align L1 weight for the default/full embedding stage (teacher is None). Set 0 for contrastive-only at full dim."},
+    )
+    align_l1_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-dimension align L1 weights, format: '64:0.5,256:1.0'. Overrides align_l1_weight/full_dim_l1_weight for listed dims."},
+    )
+    kl_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-dimension KL weights, format: '64:0.2,256:0.5'. Overrides distill_lambda for listed dims."},
+    )
     router_alpha: float = field(
         default=0.01,
         metadata={"help": "Compute penalty weight for Adaptive Matryoshka Stage-2 router training."},
