@@ -1,6 +1,6 @@
 python eval_mmeb.py \
-    --model_name training/AdaptiveMRL_fastVLM_stage1/checkpoint-epoch-1 \
-    --encode_output_path ./MMEB-evaloutputs/fastvlm_stage1/ \
+    --model_name training/AdaptiveMRL_fastVLM_stage1/checkpoint-epoch-2 \
+    --encode_output_path ./MMEB-evaloutputs/fastvlm_stage1_1/ \
     --pooling eos \
     --model_backbone llava_qwen2 \
     --normalize True \
@@ -12,4 +12,4 @@ python eval_mmeb.py \
     --image_resolution mid \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/eval_images" \
     --tgt_prefix_mod \
-    --nested_dims 64 256 512 768
+    --nested_dims 64 128 256 512 768

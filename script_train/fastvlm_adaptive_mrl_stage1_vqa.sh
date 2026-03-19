@@ -20,7 +20,7 @@ torchrun \
     --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --learning_rate 5e-5 \
-    --num_train_epochs 2 \
+    --num_train_epochs 3 \
     --save_total_limit 5 \
     --logging_steps 1 \
     --save_strategy epoch \
