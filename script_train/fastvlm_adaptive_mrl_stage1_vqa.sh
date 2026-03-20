@@ -25,10 +25,15 @@ torchrun \
     --logging_steps 1 \
     --save_strategy epoch \
     --seed 42 \
+    --lr_scheduler_type cosine \
     --weight_decay 0.01 \
     --warmup_ratio 0.03 \
     --image_resolution mid \
     --kd_loss_type adaptive_mrl_stage1 \
-    --nested_dims 64 256 512 768 \
+    --nested_dims 64 128 256 512 768 \
     --stage1_phase all \
-    --distill_lambda 0.5
+    --distill_lambda 0.5 \
+    --align_l1_weight 1.0 \
+    --full_dim_l1_weight 0.0 \
+    --align_l1_weights "64:0.2,128:0.2,256:0.2,512:0.2,768:0.2" \
+    --kl_weights "64:0.1,128:0.1,256:0.1,512:0.1,768:0.1"
