@@ -17,7 +17,7 @@ torchrun \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
     --output_dir training/AdaptiveMRL_fastVLM_stage1 \
-    --per_device_train_batch_size 64 \
+    --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --learning_rate 5e-5 \
     --num_train_epochs 2 \
@@ -35,5 +35,5 @@ torchrun \
     --distill_lambda 0.5 \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.5,128:0.5,256:0.5,512:0.5,768:0.5" \
-    --kl_weights "64:0.2,128:0.2,256:0.2,512:0.2,768:0.2"
+    --align_l1_weights "64:0.2,128:0.2,256:0.2,512:0.2,768:0.2" \
+    --kl_weights "64:0.1,128:0.1,256:0.1,512:0.1,768:0.1"

@@ -17,7 +17,7 @@ torchrun \
     --dataset_split "original" \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
     --output_dir "training/MRL_fastVLM_vqa" \
-    --per_device_train_batch_size 64 \
+    --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --lr_scheduler_type cosine \
     --learning_rate 5e-5 \
