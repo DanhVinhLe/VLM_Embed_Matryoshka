@@ -115,7 +115,7 @@ class Trainer:
         
         self.trainer = DDP(self.trainer, 
                              device_ids=[self.gpu_id],
-                             find_unused_parameters=True)
+                             find_unused_parameters=False)
     
     def _debug_batch_devices(self, obj, prefix=""):
         if obj is None:
