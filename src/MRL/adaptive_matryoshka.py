@@ -34,6 +34,11 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         self.nested_dims = sorted(set(nested_dims))
         self.phase = str(getattr(args, "stage1_phase", "all")).upper()
         self.distill_lambda = float(getattr(args, "distill_lambda", 0.5))
+        self.teacher_source = str(getattr(args, "stage1_teacher_source", "previous")).strip().lower()
+        if self.teacher_source not in {"previous", "full", "both"}:
+            raise ValueError(
+                f"Invalid stage1_teacher_source={self.teacher_source}. Use one of: previous, full, both"
+            )
         self.align_l1_weight = float(getattr(args, "align_l1_weight", 1.0))
         self.full_dim_l1_weight = float(getattr(args, "full_dim_l1_weight", 0.0))
         self.dim_align_l1_weights = self._parse_dim_weight_map(getattr(args, "align_l1_weights", ""))
@@ -239,13 +244,48 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
 
         for idx in selected_ids:
             student_dim, teacher_dim = stage_pairs[idx]
-            align_ce, align_l1, student_logits = self._cross_alignment_l1(
-                qry=qry_full,
-                pos=pos_full,
-                target=target,
-                dim=student_dim,
-                bigger_dim=teacher_dim,
-            )
+
+            # teacher candidates for this student stage
+            teacher_candidates: List[int] = []
+            full_teacher_dim = desc_dims[0]
+            if teacher_dim is not None and self.teacher_source in {"previous", "both"}:
+                teacher_candidates.append(teacher_dim)
+            if student_dim != full_teacher_dim and self.teacher_source in {"full", "both"}:
+                teacher_candidates.append(full_teacher_dim)
+            if teacher_dim is None:
+                teacher_candidates = []
+            else:
+                teacher_candidates = list(dict.fromkeys(teacher_candidates))
+
+            # Alignment branch:
+            # - full stage (no teacher): single self branch
+            # - other stages: aggregate over selected teacher candidates
+            if not teacher_candidates:
+                align_ce, align_l1, student_logits = self._cross_alignment_l1(
+                    qry=qry_full,
+                    pos=pos_full,
+                    target=target,
+                    dim=student_dim,
+                    bigger_dim=student_dim,
+                )
+            else:
+                align_ce_terms = []
+                align_l1_terms = []
+                logits_terms = []
+                for tdim in teacher_candidates:
+                    ce_i, l1_i, logits_i = self._cross_alignment_l1(
+                        qry=qry_full,
+                        pos=pos_full,
+                        target=target,
+                        dim=student_dim,
+                        bigger_dim=tdim,
+                    )
+                    align_ce_terms.append(ce_i)
+                    align_l1_terms.append(l1_i)
+                    logits_terms.append(logits_i)
+                align_ce = torch.stack(align_ce_terms).mean()
+                align_l1 = torch.stack(align_l1_terms).mean()
+                student_logits = torch.stack(logits_terms).mean(dim=0)
 
             if teacher_dim is None:
                 l1_weight = self.dim_align_l1_weights.get(student_dim, self.full_dim_l1_weight)
@@ -258,8 +298,9 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
                 distill_loss = torch.zeros_like(weighted_align_loss)
                 kl_weight = 0.0
             else:
-                teacher_logits = logits_cache[teacher_dim].detach()
-                distill_loss = self._distill_kl(student_logits, teacher_logits)
+                teacher_logits_terms = [logits_cache[tdim].detach() for tdim in teacher_candidates]
+                distill_loss_terms = [self._distill_kl(student_logits, t_logits) for t_logits in teacher_logits_terms]
+                distill_loss = torch.stack(distill_loss_terms).mean() if distill_loss_terms else torch.zeros_like(weighted_align_loss)
                 kl_weight = self.dim_kl_weights.get(student_dim, self.distill_lambda)
                 total = weighted_align_loss + kl_weight * distill_loss
 
