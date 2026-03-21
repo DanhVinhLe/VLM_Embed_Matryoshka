@@ -83,6 +83,10 @@ class DataArguments:
 
 @dataclass
 class TrainingArguments(TrainingArguments):
+    optimizer_name: str = field(
+        default="adamw",
+        metadata={"help": "Optimizer for train_ddp_one_model.py. Supported: adamw, moon (alias: muon, backed by torch.optim.Muon)."},
+    )
     image_encoder_freeze: bool = field(default=False, metadata={"help": "huggingface model name"})
     output_dir: str = field(default=None, metadata={"help": "directory for saving trained models"})
     resume_from: str = field(default="none", metadata={"help": "`auto` will detect if any previous checkpoints should be resumed. or specify specific step of the checkpoint."})
@@ -120,11 +124,31 @@ class TrainingArguments(TrainingArguments):
     nested_dims: List[int] = field(default_factory=list, metadata={"help": "List of dimensions for matryoshka evaluation, e.g. [64, 128, 256]"})
     stage1_phase: str = field(
         default="all",
-        metadata={"help": "Adaptive Matryoshka Stage-1 curriculum phase: A/B/C/D/all."},
+        metadata={"help": "Adaptive Matryoshka Stage-1 curriculum stage selector: ALL, comma-separated indices (e.g. 0,2), or labels (A,B,C,...) mapped to nested_dims order."},
+    )
+    stage1_teacher_source: str = field(
+        default="previous",
+        metadata={"help": "Teacher source for adaptive Stage-1 losses: previous, full, or both."},
     )
     distill_lambda: float = field(
         default=0.5,
         metadata={"help": "Distillation weight used in Adaptive Matryoshka Stage-1."},
+    )
+    align_l1_weight: float = field(
+        default=1.0,
+        metadata={"help": "Default weight for align L1 consistency term in Adaptive Matryoshka Stage-1 non-full-dim stages."},
+    )
+    full_dim_l1_weight: float = field(
+        default=0.0,
+        metadata={"help": "Align L1 weight for the default/full embedding stage (teacher is None). Set 0 for contrastive-only at full dim."},
+    )
+    align_l1_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-dimension align L1 weights, format: '64:0.5,256:1.0'. Overrides align_l1_weight/full_dim_l1_weight for listed dims."},
+    )
+    kl_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-dimension KL weights, format: '64:0.2,256:0.5'. Overrides distill_lambda for listed dims."},
     )
     router_alpha: float = field(
         default=0.01,

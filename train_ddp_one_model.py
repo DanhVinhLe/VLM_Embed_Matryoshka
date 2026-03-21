@@ -46,14 +46,35 @@ def get_optimizer(model, training_args):
     while isinstance(model, DDP):
         model = model.module
     optimizer_grouped_parameters = get_optimizer_params(model, training_args)
-    optimizer = AdamW(
-        optimizer_grouped_parameters, 
-        lr=training_args.learning_rate,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        weight_decay=training_args.weight_decay,
-    )
-    return optimizer
+    optimizer_name = str(getattr(training_args, "optimizer_name", "adamw")).lower()
+
+    if optimizer_name in {"adamw", "adam"}:
+        optimizer = AdamW(
+            optimizer_grouped_parameters,
+            lr=training_args.learning_rate,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=training_args.weight_decay,
+        )
+        return optimizer
+
+    if optimizer_name in {"moon", "muon"}:
+        muon_cls = getattr(torch.optim, "Muon", None)
+        if muon_cls is None:
+            raise RuntimeError(
+                "--optimizer_name moon requested, but torch.optim.Muon is not available in this PyTorch build. "
+                "Please upgrade PyTorch to a version that includes Muon."
+            )
+
+        optimizer = muon_cls(
+            optimizer_grouped_parameters,
+            lr=training_args.learning_rate,
+            weight_decay=training_args.weight_decay,
+        )
+        print_rank("Using torch.optim.Muon optimizer (requested via --optimizer_name moon)")
+        return optimizer
+
+    raise ValueError(f"Unsupported optimizer_name={optimizer_name}. Use one of: adamw, moon")
 
 def is_main_process():
     return (not dist.is_initialized()) or dist.get_rank() == 0
@@ -241,13 +262,7 @@ def main():
     print(f"Len of train dataset: {len(train_dataloader.dataset)}")
     total_steps = (len(train_dataloader.dataset) // (training_args.per_device_train_batch_size * dist.get_world_size()) // training_args.gradient_accumulation_steps) * training_args.num_train_epochs
 
-    optimizer = AdamW(
-        model_trainer.model.parameters(),
-        lr=training_args.learning_rate,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        weight_decay=training_args.weight_decay,
-    )
+    optimizer = get_optimizer(model_trainer.model, training_args)
         
     if training_args.lr_scheduler_type == "linear":
         from transformers import get_linear_schedule_with_warmup

@@ -34,6 +34,15 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         self.nested_dims = sorted(set(nested_dims))
         self.phase = str(getattr(args, "stage1_phase", "all")).upper()
         self.distill_lambda = float(getattr(args, "distill_lambda", 0.5))
+        self.teacher_source = str(getattr(args, "stage1_teacher_source", "previous")).strip().lower()
+        if self.teacher_source not in {"previous", "full", "both"}:
+            raise ValueError(
+                f"Invalid stage1_teacher_source={self.teacher_source}. Use one of: previous, full, both"
+            )
+        self.align_l1_weight = float(getattr(args, "align_l1_weight", 1.0))
+        self.full_dim_l1_weight = float(getattr(args, "full_dim_l1_weight", 0.0))
+        self.dim_align_l1_weights = self._parse_dim_weight_map(getattr(args, "align_l1_weights", ""))
+        self.dim_kl_weights = self._parse_dim_weight_map(getattr(args, "kl_weights", ""))
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -135,6 +144,69 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             valid_dims.append(full_dim)
         return sorted(set(valid_dims))
 
+    def _parse_dim_weight_map(self, spec) -> Dict[int, float]:
+        """
+        Parse per-dimension weight spec.
+
+        Accepted format: "64:0.5,256:1.0,512:1.2"
+        """
+        if not spec:
+            return {}
+        if isinstance(spec, dict):
+            return {int(k): float(v) for k, v in spec.items()}
+
+        out: Dict[int, float] = {}
+        for item in str(spec).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" not in item:
+                raise ValueError(
+                    f"Invalid dim weight entry '{item}'. Expected format like '64:0.5,256:1.0'."
+                )
+            dim_str, weight_str = item.split(":", 1)
+            out[int(dim_str.strip())] = float(weight_str.strip())
+        return out
+
+    def _resolve_selected_stage_ids(self, stage_pairs: List[Tuple[int, Optional[int]]]) -> List[int]:
+        """
+        Resolve user-selected curriculum stages.
+
+        Backward compatibility:
+          - "A/B/C/D" still maps to stage indices 0/1/2/3.
+        Generalized behavior:
+          - Any single alphabetic token maps to an index (A=0, B=1, ... Z=25).
+          - Comma-separated lists are supported, e.g. "A,C" or "0,2,4".
+          - "ALL" means include every available stage built from nested_dims.
+
+        If selection is empty or invalid, defaults to [0] (largest/full dimension stage).
+        """
+        max_idx = len(stage_pairs) - 1
+        phase = self.phase.strip().upper()
+
+        if phase == "ALL":
+            return list(range(len(stage_pairs)))
+
+        tokens = [tok.strip() for tok in phase.replace(";", ",").split(",") if tok.strip()]
+        selected_ids: List[int] = []
+        for token in tokens:
+            if token.isdigit():
+                selected_ids.append(int(token))
+                continue
+
+            if token.isalpha():
+                # Support arbitrary alphabetic stage labels beyond D.
+                if len(token) == 1:
+                    selected_ids.append(ord(token) - ord("A"))
+                else:
+                    # Accept labels like "PHASE_E" by reading the trailing letter.
+                    last_char = token[-1]
+                    if "A" <= last_char <= "Z":
+                        selected_ids.append(ord(last_char) - ord("A"))
+
+        selected_ids = sorted({idx for idx in selected_ids if 0 <= idx <= max_idx})
+        return selected_ids or [0]
+
     def forward(self, model_trainer, input_data: Dict[str, Dict[str, Tensor]]) -> Dict[str, Tensor]:
         model = model_trainer.model
         qry_input = input_data["qry"]
@@ -159,17 +231,7 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             teacher_dim = None if idx == 0 else desc_dims[idx - 1]
             stage_pairs.append((student_dim, teacher_dim))
 
-        phase_map = {
-            "A": [0],
-            "B": [1],
-            "C": [2],
-            "D": [3],
-            "ALL": list(range(len(stage_pairs))),
-        }
-        selected_ids = phase_map.get(self.phase, phase_map["ALL"])
-        selected_ids = [i for i in selected_ids if i < len(stage_pairs)]
-        if not selected_ids:
-            selected_ids = [0]
+        selected_ids = self._resolve_selected_stage_ids(stage_pairs)
 
         losses = []
         align_losses = []
@@ -182,30 +244,75 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
 
         for idx in selected_ids:
             student_dim, teacher_dim = stage_pairs[idx]
-            align_ce, align_l1, student_logits = self._cross_alignment_l1(
-                qry=qry_full,
-                pos=pos_full,
-                target=target,
-                dim=student_dim,
-                bigger_dim=teacher_dim,
-            )
-            align_loss = align_ce + align_l1
+
+            # teacher candidates for this student stage
+            teacher_candidates: List[int] = []
+            full_teacher_dim = desc_dims[0]
+            if teacher_dim is not None and self.teacher_source in {"previous", "both"}:
+                teacher_candidates.append(teacher_dim)
+            if student_dim != full_teacher_dim and self.teacher_source in {"full", "both"}:
+                teacher_candidates.append(full_teacher_dim)
+            if teacher_dim is None:
+                teacher_candidates = []
+            else:
+                teacher_candidates = list(dict.fromkeys(teacher_candidates))
+
+            # Alignment branch:
+            # - full stage (no teacher): single self branch
+            # - other stages: aggregate over selected teacher candidates
+            if not teacher_candidates:
+                align_ce, align_l1, student_logits = self._cross_alignment_l1(
+                    qry=qry_full,
+                    pos=pos_full,
+                    target=target,
+                    dim=student_dim,
+                    bigger_dim=student_dim,
+                )
+            else:
+                align_ce_terms = []
+                align_l1_terms = []
+                logits_terms = []
+                for tdim in teacher_candidates:
+                    ce_i, l1_i, logits_i = self._cross_alignment_l1(
+                        qry=qry_full,
+                        pos=pos_full,
+                        target=target,
+                        dim=student_dim,
+                        bigger_dim=tdim,
+                    )
+                    align_ce_terms.append(ce_i)
+                    align_l1_terms.append(l1_i)
+                    logits_terms.append(logits_i)
+                align_ce = torch.stack(align_ce_terms).mean()
+                align_l1 = torch.stack(align_l1_terms).mean()
+                student_logits = torch.stack(logits_terms).mean(dim=0)
 
             if teacher_dim is None:
-                total = align_loss
-                distill_loss = torch.zeros_like(align_loss)
+                l1_weight = self.dim_align_l1_weights.get(student_dim, self.full_dim_l1_weight)
             else:
-                teacher_logits = logits_cache[teacher_dim].detach()
-                distill_loss = self._distill_kl(student_logits, teacher_logits)
-                total = align_loss + self.distill_lambda * distill_loss
+                l1_weight = self.dim_align_l1_weights.get(student_dim, self.align_l1_weight)
+            weighted_align_loss = align_ce + l1_weight * align_l1
+
+            if teacher_dim is None:
+                total = weighted_align_loss
+                distill_loss = torch.zeros_like(weighted_align_loss)
+                kl_weight = 0.0
+            else:
+                teacher_logits_terms = [logits_cache[tdim].detach() for tdim in teacher_candidates]
+                distill_loss_terms = [self._distill_kl(student_logits, t_logits) for t_logits in teacher_logits_terms]
+                distill_loss = torch.stack(distill_loss_terms).mean() if distill_loss_terms else torch.zeros_like(weighted_align_loss)
+                kl_weight = self.dim_kl_weights.get(student_dim, self.distill_lambda)
+                total = weighted_align_loss + kl_weight * distill_loss
 
             metrics[f"align_ce_dim_{student_dim}"] = align_ce.detach()
             metrics[f"align_l1_dim_{student_dim}"] = align_l1.detach()
-            metrics[f"align_loss_dim_{student_dim}"] = align_loss.detach()
+            metrics[f"align_l1_weight_dim_{student_dim}"] = torch.tensor(l1_weight, device=align_ce.device)
+            metrics[f"align_loss_dim_{student_dim}"] = weighted_align_loss.detach()
             if teacher_dim is not None:
                 metrics[f"distill_loss_{student_dim}_from_{teacher_dim}"] = distill_loss.detach()
+                metrics[f"kl_weight_dim_{student_dim}"] = torch.tensor(kl_weight, device=align_ce.device)
             losses.append(total)
-            align_losses.append(align_loss)
+            align_losses.append(weighted_align_loss)
             distill_losses.append(distill_loss)
 
         final_loss = torch.stack(losses).mean()

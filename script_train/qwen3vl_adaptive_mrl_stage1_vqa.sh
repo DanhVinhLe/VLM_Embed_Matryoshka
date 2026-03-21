@@ -27,8 +27,14 @@ torchrun \
     --seed 42 \
     --weight_decay 0.01 \
     --warmup_ratio 0.03 \
+    --optimizer_name adamw \
     --image_resolution mid \
     --kd_loss_type adaptive_mrl_stage1 \
     --nested_dims 64 256 512 1024 \
     --stage1_phase all \
-    --distill_lambda 0.5
+    --stage1_teacher_source previous \
+    --distill_lambda 0.5 \
+    --align_l1_weight 1.0 \
+    --full_dim_l1_weight 0.0 \
+    --align_l1_weights "64:0.5,256:0.75,512:1.0,1024:0.0" \
+    --kl_weights "64:0.2,256:0.35,512:0.5"
