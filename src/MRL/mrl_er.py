@@ -98,7 +98,6 @@ class MatryoshkaERLoss(nn.Module):
         target_per_qry = all_student_pos_reps.size(0) // all_student_qry_reps.size(0)
         target = target * target_per_qry
 
-        dim_losses = {}
 
         # ============================================================
         # BƯỚC 1: TÍNH A_d VÀ FULL EFFECTIVE RANK (Chỉ 1 lần duy nhất)
@@ -110,7 +109,6 @@ class MatryoshkaERLoss(nn.Module):
         p_er = self.compute_full_er(A_d_pos)
         
         er_loss = (q_er + p_er) / 2.0
-        dim_losses["effective_rank_loss"] = er_loss.detach().item()
 
         # ============================================================
         # BƯỚC 2: VÒNG LẶP MATRYOSHKA
@@ -132,15 +130,12 @@ class MatryoshkaERLoss(nn.Module):
             scores = scores.view(q_norm.size(0), -1)
 
             ce_loss = self.cross_entropy(scores / self.model_trainer.temperature, target)
-            dim_losses[f"ce_loss_dim_{dim}"] = ce_loss.detach().item()
             
             # --- PCA Distillation (Chỉ thực hiện khi dim < full_dim) ---
             if dim < full_dim:
                 q_pca = self.compute_pca_projection(all_student_qry_reps, A_d_qry, dim)
                 p_pca = self.compute_pca_projection(all_student_pos_reps, A_d_pos, dim)
-                
                 align_l = self.align_loss(q_trunc, q_pca) + self.align_loss(p_trunc, p_pca)
-                dim_losses[f"align_loss_dim_{dim}"] = align_l.detach().item()
             else:
                 align_l = torch.tensor(0.0, device=device)
             
@@ -160,8 +155,8 @@ class MatryoshkaERLoss(nn.Module):
 
         result = {
             "loss": final_total_loss,
-            "contrastive_loss": dim_losses.get(f"ce_loss_dim_{self.nested_dims[-1]}", 0.0),
+            "contrastive_loss": ce_loss.detach().item(),
+            "effective_rank_loss": er_loss.detach().item()
         }
-        result.update(dim_losses)
 
         return result

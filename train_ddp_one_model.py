@@ -122,6 +122,7 @@ class Trainer:
     def run_epoch(self, epoch):
         self.train_data.sampler.set_epoch(epoch)
         total_losses, contrastive_losses = [], []
+        effective_rank_losses = []
         
         progress_bar = tqdm(total=len(self.train_data.dataset) // self.training_args.per_device_train_batch_size // self.training_args.gradient_accumulation_steps // dist.get_world_size(), 
                             desc=f"Epoch {epoch}",
@@ -133,12 +134,15 @@ class Trainer:
 
             total_loss = loss_dict['loss'] / self.training_args.gradient_accumulation_steps
             contrastive_loss = loss_dict['contrastive_loss']
+            effective_rank_loss = loss_dict['effective_rank_loss']
 
             total_losses.append(loss_dict['loss'].detach().item())
             contrastive_losses.append(contrastive_loss.detach().item())
+            effective_rank_losses.append(effective_rank_loss.detach().item())
             
             batch_loss = sum(total_losses)/len(total_losses)
             batch_contrastive_loss = sum(contrastive_losses)/len(contrastive_losses)
+            batch_effective_rank_loss = sum(effective_rank_losses)/len(effective_rank_losses)
             
             total_loss.backward()
             if (batch_idx + 1) % self.training_args.gradient_accumulation_steps == 0:
@@ -150,6 +154,7 @@ class Trainer:
                     progress_bar.set_postfix({
                         "loss": f"{batch_loss:.4f}",
                         "contrastive_loss": f"{batch_contrastive_loss:.4f}",
+                        "effective_rank_loss": f"{batch_effective_rank_loss:.4f}",
                         "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}"
                     })
                     progress_bar.update(1)
