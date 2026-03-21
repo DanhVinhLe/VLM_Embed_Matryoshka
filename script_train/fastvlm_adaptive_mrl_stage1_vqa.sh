@@ -31,11 +31,11 @@ torchrun \
     --optimizer_name adamw \
     --image_resolution mid \
     --kd_loss_type adaptive_mrl_stage1 \
-    --nested_dims 64 128 256 512 768 \
+    --nested_dims 64 128 256 512 768 896 \
     --stage1_phase all \
     --stage1_teacher_source full \
     --distill_lambda 0.5 \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.2,128:0.2,256:0.2,512:0.2,768:0.2" \
-    --kl_weights "64:0.1,128:0.1,256:0.1,512:0.1,768:0.1"
+    --align_l1_weights "64:0.5,128:0.5,256:0.5,512:0.5,768:0.5" \
+    --kl_weights "64:0.2,128:0.2,256:0.2,512:0.2,768:0.2"
