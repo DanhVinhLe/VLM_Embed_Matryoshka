@@ -83,6 +83,10 @@ class DataArguments:
 
 @dataclass
 class TrainingArguments(TrainingArguments):
+    optimizer_name: str = field(
+        default="adamw",
+        metadata={"help": "Optimizer for train_ddp_one_model.py. Supported: adamw, moon (alias: muon, backed by torch.optim.Muon)."},
+    )
     image_encoder_freeze: bool = field(default=False, metadata={"help": "huggingface model name"})
     output_dir: str = field(default=None, metadata={"help": "directory for saving trained models"})
     resume_from: str = field(default="none", metadata={"help": "`auto` will detect if any previous checkpoints should be resumed. or specify specific step of the checkpoint."})
@@ -121,6 +125,10 @@ class TrainingArguments(TrainingArguments):
     stage1_phase: str = field(
         default="all",
         metadata={"help": "Adaptive Matryoshka Stage-1 curriculum stage selector: ALL, comma-separated indices (e.g. 0,2), or labels (A,B,C,...) mapped to nested_dims order."},
+    )
+    stage1_teacher_source: str = field(
+        default="previous",
+        metadata={"help": "Teacher source for adaptive Stage-1 losses: previous, full, or both."},
     )
     distill_lambda: float = field(
         default=0.5,
