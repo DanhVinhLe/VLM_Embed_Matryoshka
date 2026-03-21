@@ -29,7 +29,7 @@ torchrun \
     --warmup_ratio 0.03 \
     --image_resolution mid \
     --kd_loss_type adaptive_router \
-    --nested_dims 64 256 512 1024 \
+    --nested_dims 64 128 256 512 1024 \
     --router_alpha 0.01 \
     --router_hidden_dim 256 \
     --router_accuracy_threshold 0.9

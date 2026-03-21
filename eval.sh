@@ -12,4 +12,4 @@ python eval_mmeb.py \
     --image_resolution mid \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/eval_images" \
     --tgt_prefix_mod \
-    --nested_dims 64 256 512 768
+    --nested_dims 64 128 256 512 768

@@ -30,7 +30,7 @@ torchrun \
     --optimizer_name adamw \
     --image_resolution mid \
     --kd_loss_type adaptive_mrl_stage1 \
-    --nested_dims 64 256 512 1024 \
+    --nested_dims 64 128 256 512 1024 \
     --stage1_phase all \
     --stage1_teacher_source previous \
     --distill_lambda 0.5 \
