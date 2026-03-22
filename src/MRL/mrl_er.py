@@ -155,8 +155,8 @@ class MatryoshkaERLoss(nn.Module):
 
         result = {
             "loss": final_total_loss,
-            "contrastive_loss": ce_loss.detach().item(),
-            "effective_rank_loss": er_loss.detach().item()
+            "contrastive_loss": ce_loss,
+            "effective_rank_loss": er_loss
         }
 
         return result
