@@ -15,25 +15,25 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
 
     This implements:
       1) CLIP-style cross-modal alignment on a chosen student prefix.
-      2) Curriculum distillation between adjacent prefixes.
+      2) Curriculum training across nested dimensions with trainable projections.
+      3) Orthogonality regularization on each projection matrix (P^T P -> I).
 
-    Supported prefix chain (default): [64, 256, 512, 1024].
+    Supported prefix chain (default): [64, 128, 256, 512, 768, 1024].
     Curriculum phases:
       - A: align on full dim only.
-      - B: align 512 + KL(sim_512 || sim_1024[detached]).
-      - C: align 256 + KL(sim_256 || sim_512[detached]).
-      - D: align 64  + KL(sim_64  || sim_256[detached]).
-      - all: sum B+C+D style terms + full-dim alignment.
+      - B: align 512 using trainable projection(s).
+      - C: align 256 using trainable projection(s).
+      - D: align 64  using trainable projection(s).
+      - all: sum all selected stages + orthogonality penalty.
     """
 
     def __init__(self, args):
         super().__init__()
         self.args = args
         self.temperature = getattr(args, "temperature", 0.02)
-        nested_dims = getattr(args, "nested_dims", None) or [64, 256, 512, 768, 1024]
+        nested_dims = getattr(args, "nested_dims", None) or [64, 128, 256, 512, 768, 1024]
         self.nested_dims = sorted(set(nested_dims))
         self.phase = str(getattr(args, "stage1_phase", "all")).upper()
-        self.distill_lambda = float(getattr(args, "distill_lambda", 0.5))
         self.teacher_source = str(getattr(args, "stage1_teacher_source", "previous")).strip().lower()
         if self.teacher_source not in {"previous", "full", "both"}:
             raise ValueError(
@@ -41,8 +41,9 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             )
         self.align_l1_weight = float(getattr(args, "align_l1_weight", 1.0))
         self.full_dim_l1_weight = float(getattr(args, "full_dim_l1_weight", 0.0))
+        self.orthogonal_weight = float(getattr(args, "orthogonal_weight", 0.01))
+        self.orthogonal_pair_weights = self._parse_pair_weight_map(getattr(args, "orthogonal_pair_weights", ""))
         self.dim_align_l1_weights = self._parse_dim_weight_map(getattr(args, "align_l1_weights", ""))
-        self.dim_kl_weights = self._parse_dim_weight_map(getattr(args, "kl_weights", ""))
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -64,29 +65,20 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         target_per_qry = p.size(0) // q.size(0)
         return target * target_per_qry
 
-    def _project_to_dim(self, x: Tensor, dim: int) -> Tensor:
-        """Project larger embedding dimensions into a smaller prefix dimension."""
-        if x.size(-1) == dim:
-            return x
-        if x.size(-1) < dim:
-            raise ValueError(f"Cannot project {x.size(-1)} -> {dim}: source dim is smaller.")
-
-        # Research-friendly deterministic projection: feature-group average pooling.
-        if x.size(-1) % dim == 0:
-            group = x.size(-1) // dim
-            return x.view(x.size(0), dim, group).mean(dim=-1)
-
-        # Fallback for non-divisible dimensions.
-        pooled = F.adaptive_avg_pool1d(x.unsqueeze(1), output_size=dim)
-        return pooled.squeeze(1)
-
-    def _similarity_logits(self, q: Tensor, p: Tensor, dim: int) -> Tensor:
-        q_dim = F.normalize(self._project_to_dim(q, dim), p=2, dim=-1)
-        p_dim = F.normalize(self._project_to_dim(p, dim), p=2, dim=-1)
-        return (q_dim @ p_dim.t()) / self.temperature
+    def _project_to_dim(self, model, x: Tensor, dim: int, src_dim: Optional[int] = None) -> Tensor:
+        if src_dim is None:
+            src_dim = x.size(-1)
+        if src_dim == dim:
+            return x[:, :dim]
+        if src_dim < dim:
+            raise ValueError(f"Cannot project {src_dim} -> {dim}: source dim is smaller.")
+        if not hasattr(model, "matryoshka_proj_bank"):
+            raise RuntimeError("Model missing `matryoshka_proj_bank`. Attach it before stage1 training.")
+        return model.matryoshka_proj_bank.project(x[:, :src_dim], src_dim=src_dim, dst_dim=dim)
 
     def _cross_alignment_l1(
         self,
+        model,
         qry: Tensor,
         pos: Tensor,
         target: Tensor,
@@ -106,37 +98,27 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         if bigger_dim is None:
             bigger_dim = dim
 
-        q_dim = F.normalize(self._project_to_dim(qry[:, :bigger_dim], dim), p=2, dim=-1)
-        p_dim = F.normalize(self._project_to_dim(pos[:, :bigger_dim], dim), p=2, dim=-1)
+        q_dim = F.normalize(self._project_to_dim(model, qry, dim, src_dim=bigger_dim), p=2, dim=-1)
+        p_dim = F.normalize(self._project_to_dim(model, pos, dim, src_dim=bigger_dim), p=2, dim=-1)
 
         # One-direction contrastive CE, consistent with base_mrl style.
         logits = (q_dim @ p_dim.t()) / self.temperature
         contrastive = F.cross_entropy(logits, target)
 
         # Cross-projected cosine maps for L1 consistency.
-        # Map-1: qry_dim x proj(pos_big)
-        q_small = F.normalize(self._project_to_dim(qry, dim), p=2, dim=-1)
-        p_from_big = F.normalize(self._project_to_dim(pos[:, :bigger_dim], dim), p=2, dim=-1)
+        # Use native prefix slices for the "small" side so only adjacent projections are required.
+        # Map-1: qry_prefix(dim) x proj(pos_big->dim)
+        q_small = F.normalize(qry[:, :dim], p=2, dim=-1)
+        p_from_big = F.normalize(self._project_to_dim(model, pos, dim, src_dim=bigger_dim), p=2, dim=-1)
         cosine_map_1 = q_small @ p_from_big.t()
 
-        # Map-2: proj(qry_big) x pos_dim
-        q_from_big = F.normalize(self._project_to_dim(qry[:, :bigger_dim], dim), p=2, dim=-1)
-        p_small = F.normalize(self._project_to_dim(pos, dim), p=2, dim=-1)
+        # Map-2: proj(qry_big->dim) x pos_prefix(dim)
+        q_from_big = F.normalize(self._project_to_dim(model, qry, dim, src_dim=bigger_dim), p=2, dim=-1)
+        p_small = F.normalize(pos[:, :dim], p=2, dim=-1)
         cosine_map_2 = q_from_big @ p_small.t()
 
         l1_consistency = F.l1_loss(cosine_map_1, cosine_map_2)
         return contrastive, l1_consistency, logits
-
-    def _distill_kl(self, student_logits: Tensor, teacher_logits: Tensor) -> Tensor:
-        """
-        KL(P_teacher || P_student) with both sides from softmax distributions.
-        Teacher logits are detached by caller.
-        """
-        teacher_prob = F.softmax(teacher_logits, dim=-1)
-        student_prob = F.softmax(student_logits, dim=-1)
-        eps = 1e-12
-        kl = teacher_prob * (torch.log(teacher_prob + eps) - torch.log(student_prob + eps))
-        return kl.sum(dim=-1).mean()
 
     def _resolve_dims(self, full_dim: int) -> List[int]:
         valid_dims = [d for d in self.nested_dims if d <= full_dim]
@@ -168,7 +150,7 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             out[int(dim_str.strip())] = float(weight_str.strip())
         return out
 
-    def _resolve_selected_stage_ids(self, stage_pairs: List[Tuple[int, Optional[int]]]) -> List[int]:
+    def _resolve_selected_stage_ids(self, stage_pairs: List[Tuple[int, int]]) -> List[int]:
         """
         Resolve user-selected curriculum stages.
 
@@ -207,6 +189,40 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         selected_ids = sorted({idx for idx in selected_ids if 0 <= idx <= max_idx})
         return selected_ids or [0]
 
+    def _parse_pair_weight_map(self, spec) -> Dict[Tuple[int, int], float]:
+        """
+        Parse per-pair orthogonal regularizer weights.
+
+        Accepted format:
+          - "1024->512:1.0,512->256:0.7"
+          - "1024:512:1.0,512:256:0.7"
+        """
+        if not spec:
+            return {}
+
+        out: Dict[Tuple[int, int], float] = {}
+        for item in str(spec).split(","):
+            item = item.strip()
+            if not item:
+                continue
+
+            if "->" in item and ":" in item:
+                pair_spec, weight_spec = item.rsplit(":", 1)
+                src_str, dst_str = pair_spec.split("->", 1)
+            else:
+                parts = item.split(":")
+                if len(parts) != 3:
+                    raise ValueError(
+                        f"Invalid orthogonal pair weight entry '{item}'. "
+                        f"Use '1024->512:1.0' (or '1024:512:1.0')."
+                    )
+                src_str, dst_str, weight_spec = parts
+
+            src_dim = int(src_str.strip())
+            dst_dim = int(dst_str.strip())
+            out[(src_dim, dst_dim)] = float(weight_spec.strip())
+        return out
+
     def forward(self, model_trainer, input_data: Dict[str, Dict[str, Tensor]]) -> Dict[str, Tensor]:
         model = model_trainer.model
         qry_input = input_data["qry"]
@@ -223,109 +239,126 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         valid_dims = self._resolve_dims(full_dim)
         target = self._build_contrastive_target(qry_full, pos_full)
 
-        # Build backbone-aware curriculum chain with full embedding dim as the first stage.
-        # stage_pairs entries: (student_dim, teacher_dim_or_None)
+        # Build strict adjacent chain:
+        # full -> full/2 -> full/4 -> ...
+        # For FastVLM configured dims this becomes 896->768->512->256->128->64.
         desc_dims = sorted(valid_dims, reverse=True)
-        stage_pairs: List[Tuple[int, Optional[int]]] = []
-        for idx, student_dim in enumerate(desc_dims):
-            teacher_dim = None if idx == 0 else desc_dims[idx - 1]
-            stage_pairs.append((student_dim, teacher_dim))
+        stage_pairs: List[Tuple[int, int]] = []
+        for idx in range(len(desc_dims) - 1):
+            teacher_dim = desc_dims[idx]
+            student_dim = desc_dims[idx + 1]
+            stage_pairs.append((teacher_dim, student_dim))
 
         selected_ids = self._resolve_selected_stage_ids(stage_pairs)
 
         losses = []
         align_losses = []
-        distill_losses = []
+        orth_losses = []
         metrics: Dict[str, Tensor] = {}
 
-        logits_cache: Dict[int, Tensor] = {}
-        for dim in sorted({d for pair in stage_pairs for d in pair if d is not None}):
-            logits_cache[dim] = self._similarity_logits(qry_full, pos_full, dim)
+        if not stage_pairs:
+            # Single-dimension fallback (no projection pair available).
+            align_ce, align_l1, _ = self._cross_alignment_l1(
+                model=model,
+                qry=qry_full,
+                pos=pos_full,
+                target=target,
+                dim=desc_dims[0],
+                bigger_dim=desc_dims[0],
+            )
+            weighted_align_loss = align_ce + self.full_dim_l1_weight * align_l1
+            metrics["loss"] = weighted_align_loss
+            metrics["total_loss"] = weighted_align_loss.detach()
+            metrics["contrastive_loss"] = weighted_align_loss.detach()
+            metrics["align_loss"] = weighted_align_loss.detach()
+            metrics["orthogonal_loss"] = torch.zeros_like(weighted_align_loss).detach()
+            return metrics
 
         for idx in selected_ids:
-            student_dim, teacher_dim = stage_pairs[idx]
+            teacher_dim, student_dim = stage_pairs[idx]
+            align_ce, align_l1, _ = self._cross_alignment_l1(
+                model=model,
+                qry=qry_full,
+                pos=pos_full,
+                target=target,
+                dim=student_dim,
+                bigger_dim=teacher_dim,
+            )
 
-            # teacher candidates for this student stage
-            teacher_candidates: List[int] = []
-            full_teacher_dim = desc_dims[0]
-            if teacher_dim is not None and self.teacher_source in {"previous", "both"}:
-                teacher_candidates.append(teacher_dim)
-            if student_dim != full_teacher_dim and self.teacher_source in {"full", "both"}:
-                teacher_candidates.append(full_teacher_dim)
-            if teacher_dim is None:
-                teacher_candidates = []
-            else:
-                teacher_candidates = list(dict.fromkeys(teacher_candidates))
-
-            # Alignment branch:
-            # - full stage (no teacher): single self branch
-            # - other stages: aggregate over selected teacher candidates
-            if not teacher_candidates:
-                align_ce, align_l1, student_logits = self._cross_alignment_l1(
-                    qry=qry_full,
-                    pos=pos_full,
-                    target=target,
-                    dim=student_dim,
-                    bigger_dim=student_dim,
-                )
-            else:
-                align_ce_terms = []
-                align_l1_terms = []
-                logits_terms = []
-                for tdim in teacher_candidates:
-                    ce_i, l1_i, logits_i = self._cross_alignment_l1(
-                        qry=qry_full,
-                        pos=pos_full,
-                        target=target,
-                        dim=student_dim,
-                        bigger_dim=tdim,
-                    )
-                    align_ce_terms.append(ce_i)
-                    align_l1_terms.append(l1_i)
-                    logits_terms.append(logits_i)
-                align_ce = torch.stack(align_ce_terms).mean()
-                align_l1 = torch.stack(align_l1_terms).mean()
-                student_logits = torch.stack(logits_terms).mean(dim=0)
-
-            if teacher_dim is None:
-                l1_weight = self.dim_align_l1_weights.get(student_dim, self.full_dim_l1_weight)
-            else:
-                l1_weight = self.dim_align_l1_weights.get(student_dim, self.align_l1_weight)
+            l1_weight = self.dim_align_l1_weights.get(student_dim, self.align_l1_weight)
             weighted_align_loss = align_ce + l1_weight * align_l1
 
-            if teacher_dim is None:
-                total = weighted_align_loss
-                distill_loss = torch.zeros_like(weighted_align_loss)
-                kl_weight = 0.0
+            if hasattr(model, "matryoshka_proj_bank"):
+                base_orth = model.matryoshka_proj_bank.orthogonality_loss(src_dim=teacher_dim, dst_dim=student_dim)
+                pair_weight = self.orthogonal_pair_weights.get((teacher_dim, student_dim), 1.0)
+                orth_loss = pair_weight * base_orth
             else:
-                teacher_logits_terms = [logits_cache[tdim].detach() for tdim in teacher_candidates]
-                distill_loss_terms = [self._distill_kl(student_logits, t_logits) for t_logits in teacher_logits_terms]
-                distill_loss = torch.stack(distill_loss_terms).mean() if distill_loss_terms else torch.zeros_like(weighted_align_loss)
-                kl_weight = self.dim_kl_weights.get(student_dim, self.distill_lambda)
-                total = weighted_align_loss + kl_weight * distill_loss
+                orth_loss = torch.zeros_like(weighted_align_loss)
 
-            metrics[f"align_ce_dim_{student_dim}"] = align_ce.detach()
-            metrics[f"align_l1_dim_{student_dim}"] = align_l1.detach()
-            metrics[f"align_l1_weight_dim_{student_dim}"] = torch.tensor(l1_weight, device=align_ce.device)
-            metrics[f"align_loss_dim_{student_dim}"] = weighted_align_loss.detach()
-            if teacher_dim is not None:
-                metrics[f"distill_loss_{student_dim}_from_{teacher_dim}"] = distill_loss.detach()
-                metrics[f"kl_weight_dim_{student_dim}"] = torch.tensor(kl_weight, device=align_ce.device)
+            total = weighted_align_loss + self.orthogonal_weight * orth_loss
+
+            metrics[f"align_ce_{teacher_dim}_to_{student_dim}"] = align_ce.detach()
+            metrics[f"align_l1_{teacher_dim}_to_{student_dim}"] = align_l1.detach()
+            metrics[f"align_l1_weight_{teacher_dim}_to_{student_dim}"] = torch.tensor(l1_weight, device=align_ce.device)
+            metrics[f"align_loss_{teacher_dim}_to_{student_dim}"] = weighted_align_loss.detach()
+            metrics[f"orthogonal_loss_{teacher_dim}_to_{student_dim}"] = orth_loss.detach()
             losses.append(total)
             align_losses.append(weighted_align_loss)
-            distill_losses.append(distill_loss)
+            orth_losses.append(orth_loss)
 
         final_loss = torch.stack(losses).mean()
         mean_align_loss = torch.stack(align_losses).mean()
-        mean_distill_loss = torch.stack(distill_losses).mean()
+        mean_orth_loss = torch.stack(orth_losses).mean()
 
         # Keep `contrastive_loss` for compatibility with existing trainer logging.
         metrics["loss"] = final_loss
         metrics["total_loss"] = final_loss.detach()
         metrics["contrastive_loss"] = mean_align_loss
         metrics["align_loss"] = mean_align_loss.detach()
-        metrics["distill_loss"] = mean_distill_loss.detach()
+        metrics["orthogonal_loss"] = mean_orth_loss.detach()
         return metrics
+
+
+class PairwiseProjectionBank(nn.Module):
+    """Trainable projection matrices P for mapping src_dim -> dst_dim with orthogonality regularization."""
+
+    def __init__(self, dimension_pairs: List[Tuple[int, int]]):
+        super().__init__()
+        self.projections = nn.ParameterDict()
+        for src_dim, dst_dim in dimension_pairs:
+            key = self._key(src_dim, dst_dim)
+            self.projections[key] = nn.Parameter(self._init_projection(src_dim, dst_dim))
+
+    @staticmethod
+    def _key(src_dim: int, dst_dim: int) -> str:
+        return f"{int(src_dim)}_to_{int(dst_dim)}"
+
+    @staticmethod
+    def _init_projection(src_dim: int, dst_dim: int) -> Tensor:
+        if src_dim == dst_dim:
+            return torch.eye(src_dim, dtype=torch.float32)
+        mat = torch.randn(src_dim, dst_dim, dtype=torch.float32)
+        q, _ = torch.linalg.qr(mat, mode="reduced")
+        return q[:, :dst_dim]
+
+    def project(self, x: Tensor, src_dim: int, dst_dim: int) -> Tensor:
+        if src_dim == dst_dim:
+            return x[:, :dst_dim]
+        key = self._key(src_dim, dst_dim)
+        if key not in self.projections:
+            raise KeyError(f"Missing projection matrix for {src_dim}->{dst_dim}.")
+        return x @ self.projections[key]
+
+    def orthogonality_loss(self, src_dim: int, dst_dim: int) -> Tensor:
+        if src_dim == dst_dim:
+            return torch.zeros((), device=next(self.parameters()).device)
+        key = self._key(src_dim, dst_dim)
+        if key not in self.projections:
+            raise KeyError(f"Missing projection matrix for {src_dim}->{dst_dim}.")
+        p = self.projections[key]
+        gram = p.transpose(0, 1) @ p
+        eye = torch.eye(dst_dim, device=p.device, dtype=p.dtype)
+        return ((gram - eye) ** 2).mean()
 
 
 class AdaptiveDimensionRouter(nn.Module):
@@ -333,7 +366,7 @@ class AdaptiveDimensionRouter(nn.Module):
     Router MLP for Stage-2 adaptive dimension selection.
 
     Input  : query embedding (full dim).
-    Output : logits over dimension levels [64, 256, 512, 1024] (or configured dims).
+    Output : logits over dimension levels [64, 128, 256, 512, 768, 1024] (or configured dims).
     """
 
     def __init__(self, input_dim: int, dim_levels: List[int], hidden_dim: int = 256):
@@ -362,7 +395,7 @@ class AdaptiveRouterLoss(nn.Module):
         super().__init__()
         self.args = args
         self.temperature = getattr(args, "temperature", 0.02)
-        self.dim_levels = sorted(getattr(args, "nested_dims", None) or [64, 256, 512, 768, 1024])
+        self.dim_levels = sorted(getattr(args, "nested_dims", None) or [64, 128, 256, 512, 768, 1024])
         self.alpha = float(getattr(args, "router_alpha", 0.01))
         self.threshold = float(getattr(args, "router_accuracy_threshold", 0.9))
         self.router_hidden_dim = int(getattr(args, "router_hidden_dim", 256))
