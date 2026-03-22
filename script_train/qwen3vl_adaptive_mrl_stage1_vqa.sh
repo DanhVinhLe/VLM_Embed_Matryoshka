@@ -32,7 +32,7 @@ torchrun \
     --kd_loss_type adaptive_mrl_stage1 \
     --nested_dims 64 128 256 512 1024 2048 \
     --stage1_phase all \
-    --stage1_teacher_source full \
+    --stage1_teacher_source previous \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
     --align_l1_weights "64:0.5,128:0.5,256:0.75,512:1.0,1024:1.0" \
