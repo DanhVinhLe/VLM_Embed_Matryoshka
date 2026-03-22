@@ -106,14 +106,15 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         contrastive = F.cross_entropy(logits, target)
 
         # Cross-projected cosine maps for L1 consistency.
-        # Map-1: qry_dim x proj(pos_big)
-        q_small = F.normalize(self._project_to_dim(model, qry, dim, src_dim=qry.size(-1)), p=2, dim=-1)
+        # Use native prefix slices for the "small" side so only adjacent projections are required.
+        # Map-1: qry_prefix(dim) x proj(pos_big->dim)
+        q_small = F.normalize(qry[:, :dim], p=2, dim=-1)
         p_from_big = F.normalize(self._project_to_dim(model, pos, dim, src_dim=bigger_dim), p=2, dim=-1)
         cosine_map_1 = q_small @ p_from_big.t()
 
-        # Map-2: proj(qry_big) x pos_dim
+        # Map-2: proj(qry_big->dim) x pos_prefix(dim)
         q_from_big = F.normalize(self._project_to_dim(model, qry, dim, src_dim=bigger_dim), p=2, dim=-1)
-        p_small = F.normalize(self._project_to_dim(model, pos, dim, src_dim=pos.size(-1)), p=2, dim=-1)
+        p_small = F.normalize(pos[:, :dim], p=2, dim=-1)
         cosine_map_2 = q_from_big @ p_small.t()
 
         l1_consistency = F.l1_loss(cosine_map_1, cosine_map_2)
