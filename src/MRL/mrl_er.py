@@ -14,8 +14,8 @@ class MatryoshkaERLoss(nn.Module):
         self.nested_dims = getattr(args, 'nested_dims', [64, 128, 256, 512, 1024])
         self.average_loss = getattr(args, 'average_loss', True)
         
-        self.alpha_ce = getattr(args, 'alpha_ce', 1) 
-        self.beta_align = getattr(args, 'beta_align', 1) 
+        self.alpha_ce = getattr(args, 'alpha_ce', 1.0) 
+        self.beta_align = getattr(args, 'beta_align', 1.0) 
         self.gamma_er = getattr(args, 'gamma_er', 0.05) 
 
         if dist.is_initialized():
@@ -33,35 +33,38 @@ class MatryoshkaERLoss(nn.Module):
         all_tensors = torch.cat(all_tensors, dim=0)
         return all_tensors
 
-    def compute_inner_dependency(self, x: Tensor):
-        """Tính ma trận A_d (Inner-Dependency) 1 lần duy nhất để dùng chung."""
+    def compute_svd_and_er(self, x: Tensor):
+        """
+        Tính toán SVD và Effective Rank 1 lần duy nhất cho toàn bộ các bước.
+        Trả về Full U, Full S (dùng để slice cắt PCA) và giá trị ER Loss.
+        """
         bs, d = x.shape
         outer_product = torch.bmm(x.unsqueeze(2), x.unsqueeze(1))
         A_d = F.softmax(outer_product / math.sqrt(d), dim=-1)
-        return A_d
 
-    def compute_full_er(self, A_d: Tensor):
-        """Tính Effective Rank chuẩn hóa trên toàn bộ D chiều."""
-        d = A_d.shape[-1]
+        # 1. TÍNH FULL SVD (Chỉ 1 lần)
+        U, S, _ = torch.linalg.svd(A_d.float())
         
-        # svdvals cực nhanh vì không cần tính ma trận U, V
-        full_S = torch.linalg.svdvals(A_d.float())
-        
+        U = U.to(x.dtype)
+        S = S.to(x.dtype)
+
+        # 2. TÍNH FULL EFFECTIVE RANK TỪ S
         eps = 1e-8
-        p_full = full_S / (full_S.sum(dim=-1, keepdim=True) + eps)
+        p_full = S / (S.sum(dim=-1, keepdim=True) + eps)
         h_entropy = -torch.sum(p_full * torch.log(p_full + eps), dim=-1)
         
-        # Giá trị trả về nằm trong khoảng (0, 1]
         effective_rank = (torch.exp(h_entropy) / d).mean()
-        return effective_rank
 
-    def compute_pca_projection(self, x: Tensor, A_d: Tensor, dim: int):
-        """Thực hiện Randomized SVD và chiếu PCA dựa trên A_d đã tính."""
-        U_k, S_k, _ = torch.svd_lowrank(A_d.float(), q=dim)
+        return U, S, effective_rank
+
+    def project_pca(self, x: Tensor, U: Tensor, S: Tensor, dim: int):
+        """
+        Slice ma trận U và S tới kích thước dim, sau đó project x.
+        Cực kỳ nhanh vì SVD đã được tính sẵn.
+        """
+        U_k = U[:, :, :dim]
+        S_k = S[:, :dim]
         
-        U_k = U_k.to(x.dtype)
-        S_k = S_k.to(x.dtype)
-
         A_k = U_k * S_k.unsqueeze(1)
         x_pca = torch.bmm(A_k.transpose(1, 2), x.unsqueeze(2)).squeeze(2)
         return x_pca
@@ -100,13 +103,10 @@ class MatryoshkaERLoss(nn.Module):
 
 
         # ============================================================
-        # BƯỚC 1: TÍNH A_d VÀ FULL EFFECTIVE RANK (Chỉ 1 lần duy nhất)
+        # BƯỚC 1: TIỀN XỬ LÝ SVD & EFFECTIVE RANK (Chỉ 1 lần duy nhất)
         # ============================================================
-        A_d_qry = self.compute_inner_dependency(all_student_qry_reps)
-        A_d_pos = self.compute_inner_dependency(all_student_pos_reps)
-
-        q_er = self.compute_full_er(A_d_qry)
-        p_er = self.compute_full_er(A_d_pos)
+        U_qry, S_qry, q_er = self.compute_svd_and_er(all_student_qry_reps)
+        U_pos, S_pos, p_er = self.compute_svd_and_er(all_student_pos_reps)
         
         er_loss = (q_er + p_er) / 2.0
 
@@ -131,10 +131,12 @@ class MatryoshkaERLoss(nn.Module):
 
             ce_loss = self.cross_entropy(scores / self.model_trainer.temperature, target)
             
-            # --- PCA Distillation (Chỉ thực hiện khi dim < full_dim) ---
+            # --- Cắt Slice PCA Distillation ---
             if dim < full_dim:
-                q_pca = self.compute_pca_projection(all_student_qry_reps, A_d_qry, dim)
-                p_pca = self.compute_pca_projection(all_student_pos_reps, A_d_pos, dim)
+                # Trích xuất và chiếu cực nhanh dựa trên U và S đã tính
+                q_pca = self.project_pca(all_student_qry_reps, U_qry, S_qry, dim)
+                p_pca = self.project_pca(all_student_pos_reps, U_pos, S_pos, dim)
+                
                 align_l = self.align_loss(q_trunc, q_pca) + self.align_loss(p_trunc, p_pca)
             else:
                 align_l = torch.tensor(0.0, device=device)
@@ -150,7 +152,7 @@ class MatryoshkaERLoss(nn.Module):
         if self.average_loss and num_dims > 0:
             total_dim_loss = total_dim_loss / num_dims
 
-        # Cộng ER Loss vào tổng chung 1 lần ở cuối cùng
+        # Cộng ER Loss toàn cục
         final_total_loss = total_dim_loss + (self.gamma_er * er_loss)
 
         result = {
