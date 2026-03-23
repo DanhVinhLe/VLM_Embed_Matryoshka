@@ -239,15 +239,21 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         valid_dims = self._resolve_dims(full_dim)
         target = self._build_contrastive_target(qry_full, pos_full)
 
-        # Build strict adjacent chain:
-        # full -> full/2 -> full/4 -> ...
-        # For FastVLM configured dims this becomes 896->768->512->256->128->64.
+        # Build stage pairs based on teacher_source.
+        # previous: adjacent chain (e.g., 896->768->512->...)
+        # full    : full dim projects to every smaller dim (e.g., 896->768, 896->512, ...)
+        # both    : union of previous + full pairs.
         desc_dims = sorted(valid_dims, reverse=True)
+        full_teacher_dim = desc_dims[0]
         stage_pairs: List[Tuple[int, int]] = []
-        for idx in range(len(desc_dims) - 1):
-            teacher_dim = desc_dims[idx]
-            student_dim = desc_dims[idx + 1]
-            stage_pairs.append((teacher_dim, student_dim))
+        if self.teacher_source in {"previous", "both"}:
+            for idx in range(len(desc_dims) - 1):
+                stage_pairs.append((desc_dims[idx], desc_dims[idx + 1]))
+        if self.teacher_source in {"full", "both"}:
+            for student_dim in desc_dims[1:]:
+                stage_pairs.append((full_teacher_dim, student_dim))
+        # remove duplicates while preserving order
+        stage_pairs = list(dict.fromkeys(stage_pairs))
 
         selected_ids = self._resolve_selected_stage_ids(stage_pairs)
 

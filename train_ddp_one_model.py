@@ -34,6 +34,43 @@ logging.getLogger('numba').setLevel(logging.WARNING)
 # Todo
 # wandb.login(key="f5a118efa8813fb4edc7f6b8a7ab5c9c5f9e1ece")
 
+
+class CombinedOptimizer:
+    """
+    Minimal wrapper to step multiple optimizers together while remaining scheduler-compatible.
+    Useful for Muon(2D params) + AdamW(non-2D params).
+    """
+
+    def __init__(self, optimizers):
+        self.optimizers = optimizers
+        self.param_groups = []
+        for opt in self.optimizers:
+            self.param_groups.extend(opt.param_groups)
+
+    def step(self, closure=None):
+        loss = None
+        for opt in self.optimizers:
+            out = opt.step(closure=closure) if closure is not None else opt.step()
+            if out is not None:
+                loss = out
+        return loss
+
+    def zero_grad(self, set_to_none: bool = False):
+        for opt in self.optimizers:
+            opt.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        return {"optimizers": [opt.state_dict() for opt in self.optimizers]}
+
+    def load_state_dict(self, state_dict):
+        states = state_dict.get("optimizers", [])
+        if len(states) != len(self.optimizers):
+            raise ValueError(
+                f"CombinedOptimizer got {len(states)} optimizer states, expected {len(self.optimizers)}."
+            )
+        for opt, opt_state in zip(self.optimizers, states):
+            opt.load_state_dict(opt_state)
+
 def get_optimizer_params(model, training_args):
     param_optimizer = list(model.named_parameters())
     optimizer_grouped_parameters = [
@@ -65,14 +102,56 @@ def get_optimizer(model, training_args):
                 "--optimizer_name moon requested, but torch.optim.Muon is not available in this PyTorch build. "
                 "Please upgrade PyTorch to a version that includes Muon."
             )
+        param_optimizer = list(model.named_parameters())
+        muon_params = [p for _, p in param_optimizer if p.requires_grad and p.ndim == 2]
+        non_muon_params = [p for _, p in param_optimizer if p.requires_grad and p.ndim != 2]
+        non_2d_strategy = str(getattr(training_args, "moon_non_2d_strategy", "hybrid")).lower()
+        if non_2d_strategy not in {"hybrid", "skip", "error"}:
+            raise ValueError(
+                f"Invalid moon_non_2d_strategy={non_2d_strategy}. "
+                "Use one of: hybrid, skip, error."
+            )
 
-        optimizer = muon_cls(
-            optimizer_grouped_parameters,
+        if not muon_params:
+            raise RuntimeError(
+                "--optimizer_name moon requested, but no trainable 2D parameters were found for Muon."
+            )
+
+        muon_optimizer = muon_cls(
+            [{"params": muon_params}],
             lr=training_args.learning_rate,
             weight_decay=training_args.weight_decay,
         )
-        print_rank("Using torch.optim.Muon optimizer (requested via --optimizer_name moon)")
-        return optimizer
+
+        if non_muon_params and non_2d_strategy == "error":
+            raise RuntimeError(
+                "--optimizer_name moon with --moon_non_2d_strategy error: found non-2D trainable params. "
+                "Use --moon_non_2d_strategy hybrid or skip."
+            )
+
+        if non_muon_params and non_2d_strategy == "hybrid":
+            adamw_optimizer = AdamW(
+                [{"params": non_muon_params}],
+                lr=training_args.learning_rate,
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=training_args.weight_decay,
+            )
+            print_rank(
+                "Using hybrid optimizer: Muon for 2D params, AdamW for non-2D params "
+                f"(counts: muon={len(muon_params)}, adamw={len(non_muon_params)})."
+            )
+            return CombinedOptimizer([muon_optimizer, adamw_optimizer])
+
+        if non_muon_params and non_2d_strategy == "skip":
+            print_rank(
+                "Using Muon-only optimizer; non-2D trainable params are excluded from optimization "
+                f"(counts: muon={len(muon_params)}, skipped={len(non_muon_params)})."
+            )
+        else:
+            print_rank(f"Using torch.optim.Muon optimizer on all trainable params ({len(muon_params)} tensors).")
+
+        return muon_optimizer
 
     raise ValueError(f"Unsupported optimizer_name={optimizer_name}. Use one of: adamw, moon")
 

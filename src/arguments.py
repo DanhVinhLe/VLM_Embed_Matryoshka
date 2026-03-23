@@ -87,6 +87,10 @@ class TrainingArguments(TrainingArguments):
         default="adamw",
         metadata={"help": "Optimizer for train_ddp_one_model.py. Supported: adamw, moon (alias: muon, backed by torch.optim.Muon)."},
     )
+    moon_non_2d_strategy: str = field(
+        default="hybrid",
+        metadata={"help": "When optimizer_name=moon and non-2D params exist: hybrid (Muon+AdamW), skip (Muon-only on 2D params), or error."},
+    )
     image_encoder_freeze: bool = field(default=False, metadata={"help": "huggingface model name"})
     output_dir: str = field(default=None, metadata={"help": "directory for saving trained models"})
     resume_from: str = field(default="none", metadata={"help": "`auto` will detect if any previous checkpoints should be resumed. or specify specific step of the checkpoint."})

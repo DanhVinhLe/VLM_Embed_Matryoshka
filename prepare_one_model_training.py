@@ -122,10 +122,20 @@ class OneModelTrainer(nn.Module):
 
         valid_dims = sorted({int(d) for d in nested_dims if int(d) <= int(full_dim)} | {int(full_dim)})
         desc_dims = sorted(valid_dims, reverse=True)
-        dimension_pairs = [
-            (int(desc_dims[i]), int(desc_dims[i + 1]))
-            for i in range(len(desc_dims) - 1)
-        ]
+        teacher_source = str(getattr(self.training_args, "stage1_teacher_source", "previous")).strip().lower()
+        dimension_pairs = []
+        if teacher_source in {"previous", "both"}:
+            dimension_pairs.extend(
+                (int(desc_dims[i]), int(desc_dims[i + 1]))
+                for i in range(len(desc_dims) - 1)
+            )
+        if teacher_source in {"full", "both"}:
+            full_teacher_dim = int(desc_dims[0])
+            dimension_pairs.extend(
+                (full_teacher_dim, int(student_dim))
+                for student_dim in desc_dims[1:]
+            )
+        dimension_pairs = list(dict.fromkeys(dimension_pairs))
 
         self.model.matryoshka_proj_bank = PairwiseProjectionBank(dimension_pairs).to(self.device)
         print_rank(
