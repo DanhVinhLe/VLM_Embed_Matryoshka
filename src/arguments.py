@@ -87,6 +87,10 @@ class TrainingArguments(TrainingArguments):
         default="adamw",
         metadata={"help": "Optimizer for train_ddp_one_model.py. Supported: adamw, moon (alias: muon, backed by torch.optim.Muon)."},
     )
+    moon_non_2d_strategy: str = field(
+        default="hybrid",
+        metadata={"help": "When optimizer_name=moon and non-2D params exist: hybrid (Muon+AdamW), skip (Muon-only on 2D params), or error."},
+    )
     image_encoder_freeze: bool = field(default=False, metadata={"help": "huggingface model name"})
     output_dir: str = field(default=None, metadata={"help": "directory for saving trained models"})
     resume_from: str = field(default="none", metadata={"help": "`auto` will detect if any previous checkpoints should be resumed. or specify specific step of the checkpoint."})
@@ -130,10 +134,6 @@ class TrainingArguments(TrainingArguments):
         default="previous",
         metadata={"help": "Teacher source for adaptive Stage-1 losses: previous, full, or both."},
     )
-    distill_lambda: float = field(
-        default=0.5,
-        metadata={"help": "Distillation weight used in Adaptive Matryoshka Stage-1."},
-    )
     align_l1_weight: float = field(
         default=1.0,
         metadata={"help": "Default weight for align L1 consistency term in Adaptive Matryoshka Stage-1 non-full-dim stages."},
@@ -146,9 +146,13 @@ class TrainingArguments(TrainingArguments):
         default="",
         metadata={"help": "Optional per-dimension align L1 weights, format: '64:0.5,256:1.0'. Overrides align_l1_weight/full_dim_l1_weight for listed dims."},
     )
-    kl_weights: str = field(
+    orthogonal_weight: float = field(
+        default=0.01,
+        metadata={"help": "Weight for the orthogonality regularizer on projection matrices in Adaptive Matryoshka Stage-1."},
+    )
+    orthogonal_pair_weights: str = field(
         default="",
-        metadata={"help": "Optional per-dimension KL weights, format: '64:0.2,256:0.5'. Overrides distill_lambda for listed dims."},
+        metadata={"help": "Optional per-projection orthogonality weights. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
     )
     router_alpha: float = field(
         default=0.01,

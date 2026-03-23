@@ -33,8 +33,8 @@ torchrun \
     --nested_dims 64 128 256 512 1024 2048 \
     --stage1_phase all \
     --stage1_teacher_source full \
-    --distill_lambda 0.5 \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
     --align_l1_weights "64:0.5,128:0.5,256:0.75,512:1.0,1024:1.0" \
-    --kl_weights "64:0.2,128:0.25,256:0.35,512:0.5,1024:1.0"
+    --orthogonal_weight 0.01 \
+    --orthogonal_pair_weights "2048->1024:1.0,2048->512:1.0,2048->256:1.0,2048->128:1.0,2048->64:1.0"
