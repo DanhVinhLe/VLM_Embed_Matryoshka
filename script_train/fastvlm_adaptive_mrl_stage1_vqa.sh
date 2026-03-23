@@ -25,7 +25,7 @@ torchrun \
     --logging_steps 1 \
     --save_strategy epoch \
     --seed 42 \
-    --lr_scheduler_type cosine \
+    --lr_scheduler_type constant \
     --weight_decay 0.01 \
     --warmup_ratio 0.03 \
     --optimizer_name adamw \
@@ -33,9 +33,9 @@ torchrun \
     --kd_loss_type adaptive_mrl_stage1 \
     --nested_dims 64 128 256 512 768 896 \
     --stage1_phase all \
-    --stage1_teacher_source full \
+    --stage1_teacher_source previous \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.5,128:0.5,256:0.5,512:0.5,768:0.5" \
+    --align_l1_weights "64:0.6,128:0.6,256:0.6,512:0.6,768:0.6" \
     --orthogonal_weight 0.01 \
-    --orthogonal_pair_weights "896->768:1.0,896->512:1.0,896->256:1.0,896->128:1.0,896->64:1.0"
+    --orthogonal_pair_weights "896->768:0.01,768->512:0.01,512->256:0.01,256->128:0.01,128->64:0.01"
