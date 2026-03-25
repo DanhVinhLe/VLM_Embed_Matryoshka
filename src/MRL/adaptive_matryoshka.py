@@ -19,12 +19,10 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
       3) Orthogonality regularization on each projection matrix (P^T P -> I).
 
     Supported prefix chain (default): [64, 128, 256, 512, 768, 1024].
-    Curriculum phases:
-      - A: align on full dim only.
-      - B: align 512 using trainable projection(s).
-      - C: align 256 using trainable projection(s).
-      - D: align 64  using trainable projection(s).
-      - all: sum all selected stages + orthogonality penalty.
+    Curriculum stage pairs are built from:
+      - explicit user projection graph (`stage1_projection_spec`), or
+      - all larger->smaller valid pairs from configured dims.
+    Multiple larger dimensions can project into the same smaller dimension.
     """
 
     def __init__(self, args):
@@ -34,15 +32,12 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         nested_dims = getattr(args, "nested_dims", None) or [64, 128, 256, 512, 768, 1024]
         self.nested_dims = sorted(set(nested_dims))
         self.phase = str(getattr(args, "stage1_phase", "all")).upper()
-        self.teacher_source = str(getattr(args, "stage1_teacher_source", "previous")).strip().lower()
-        if self.teacher_source not in {"previous", "full", "both"}:
-            raise ValueError(
-                f"Invalid stage1_teacher_source={self.teacher_source}. Use one of: previous, full, both"
-            )
+        self.projection_spec = str(getattr(args, "stage1_projection_spec", "")).strip()
         self.align_l1_weight = float(getattr(args, "align_l1_weight", 1.0))
         self.full_dim_l1_weight = float(getattr(args, "full_dim_l1_weight", 0.0))
         self.orthogonal_weight = float(getattr(args, "orthogonal_weight", 0.01))
         self.orthogonal_pair_weights = self._parse_pair_weight_map(getattr(args, "orthogonal_pair_weights", ""))
+        self.projection_weights = self._parse_pair_weight_map(getattr(args, "stage1_projection_weights", ""))
         self.dim_align_l1_weights = self._parse_dim_weight_map(getattr(args, "align_l1_weights", ""))
 
         if dist.is_initialized():
@@ -223,6 +218,47 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             out[(src_dim, dst_dim)] = float(weight_spec.strip())
         return out
 
+    @staticmethod
+    def _resolve_pair_weight(weight_map: Dict[Tuple[int, int], float], src_dim: int, dst_dim: int, default: float = 1.0) -> float:
+        """
+        Resolve a pair weight with explicit fallback.
+        - If (src_dim, dst_dim) exists in `weight_map`, use it.
+        - Otherwise use `default`.
+        """
+        return float(weight_map.get((src_dim, dst_dim), default))
+
+    def _parse_projection_pairs(self, spec: str) -> List[Tuple[int, int]]:
+        """
+        Parse projection pair spec in formats:
+          - "1024->768,1024->512,768->512"
+          - "1024:768,1024:512"
+        """
+        out: List[Tuple[int, int]] = []
+        if not spec:
+            return out
+        for item in str(spec).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "->" in item:
+                src_str, dst_str = item.split("->", 1)
+            else:
+                parts = item.split(":")
+                if len(parts) != 2:
+                    raise ValueError(
+                        f"Invalid stage1 projection entry '{item}'. "
+                        f"Use '1024->768' (or '1024:768')."
+                    )
+                src_str, dst_str = parts
+            src_dim = int(src_str.strip())
+            dst_dim = int(dst_str.strip())
+            if src_dim <= dst_dim:
+                raise ValueError(
+                    f"Invalid projection pair {src_dim}->{dst_dim}. Source dim must be larger than destination dim."
+                )
+            out.append((src_dim, dst_dim))
+        return out
+
     def forward(self, model_trainer, input_data: Dict[str, Dict[str, Tensor]]) -> Dict[str, Tensor]:
         model = model_trainer.model
         qry_input = input_data["qry"]
@@ -239,19 +275,22 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         valid_dims = self._resolve_dims(full_dim)
         target = self._build_contrastive_target(qry_full, pos_full)
 
-        # Build stage pairs based on teacher_source.
-        # previous: adjacent chain (e.g., 896->768->512->...)
-        # full    : full dim projects to every smaller dim (e.g., 896->768, 896->512, ...)
-        # both    : union of previous + full pairs.
         desc_dims = sorted(valid_dims, reverse=True)
-        full_teacher_dim = desc_dims[0]
         stage_pairs: List[Tuple[int, int]] = []
-        if self.teacher_source in {"previous", "both"}:
-            for idx in range(len(desc_dims) - 1):
-                stage_pairs.append((desc_dims[idx], desc_dims[idx + 1]))
-        if self.teacher_source in {"full", "both"}:
-            for student_dim in desc_dims[1:]:
-                stage_pairs.append((full_teacher_dim, student_dim))
+        if self.projection_spec:
+            parsed_pairs = self._parse_projection_pairs(self.projection_spec)
+            valid_dim_set = set(valid_dims)
+            stage_pairs = [
+                (src_dim, dst_dim)
+                for src_dim, dst_dim in parsed_pairs
+                if src_dim in valid_dim_set and dst_dim in valid_dim_set
+            ]
+        else:
+            # Default: all valid larger->smaller pairs.
+            for src_dim in desc_dims:
+                for dst_dim in desc_dims:
+                    if src_dim > dst_dim:
+                        stage_pairs.append((src_dim, dst_dim))
         # remove duplicates while preserving order
         stage_pairs = list(dict.fromkeys(stage_pairs))
 
@@ -293,19 +332,35 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
 
             l1_weight = self.dim_align_l1_weights.get(student_dim, self.align_l1_weight)
             weighted_align_loss = align_ce + l1_weight * align_l1
+            projection_weight = self._resolve_pair_weight(
+                self.projection_weights,
+                teacher_dim,
+                student_dim,
+                default=1.0,
+            )
 
             if hasattr(model, "matryoshka_proj_bank"):
                 base_orth = model.matryoshka_proj_bank.orthogonality_loss(src_dim=teacher_dim, dst_dim=student_dim)
-                pair_weight = self.orthogonal_pair_weights.get((teacher_dim, student_dim), 1.0)
-                orth_loss = pair_weight * base_orth
+                orth_pair_weight = self._resolve_pair_weight(
+                    self.orthogonal_pair_weights,
+                    teacher_dim,
+                    student_dim,
+                    default=1.0,
+                )
+                orth_loss = orth_pair_weight * base_orth
             else:
+                orth_pair_weight = 1.0
                 orth_loss = torch.zeros_like(weighted_align_loss)
 
-            total = weighted_align_loss + self.orthogonal_weight * orth_loss
+            total = projection_weight * weighted_align_loss + self.orthogonal_weight * projection_weight * orth_loss
 
             metrics[f"align_ce_{teacher_dim}_to_{student_dim}"] = align_ce.detach()
             metrics[f"align_l1_{teacher_dim}_to_{student_dim}"] = align_l1.detach()
             metrics[f"align_l1_weight_{teacher_dim}_to_{student_dim}"] = torch.tensor(l1_weight, device=align_ce.device)
+            metrics[f"projection_weight_{teacher_dim}_to_{student_dim}"] = torch.tensor(projection_weight, device=align_ce.device)
+            metrics[f"orthogonal_pair_weight_{teacher_dim}_to_{student_dim}"] = torch.tensor(
+                orth_pair_weight, device=align_ce.device
+            )
             metrics[f"align_loss_{teacher_dim}_to_{student_dim}"] = weighted_align_loss.detach()
             metrics[f"orthogonal_loss_{teacher_dim}_to_{student_dim}"] = orth_loss.detach()
             losses.append(total)

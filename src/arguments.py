@@ -130,9 +130,13 @@ class TrainingArguments(TrainingArguments):
         default="all",
         metadata={"help": "Adaptive Matryoshka Stage-1 curriculum stage selector: ALL, comma-separated indices (e.g. 0,2), or labels (A,B,C,...) mapped to nested_dims order."},
     )
-    stage1_teacher_source: str = field(
-        default="previous",
-        metadata={"help": "Teacher source for adaptive Stage-1 losses: previous, full, or both."},
+    stage1_projection_spec: str = field(
+        default="",
+        metadata={"help": "Optional explicit Stage-1 projection graph. Format: '1024->768,1024->512,768->512'. If empty, all valid larger->smaller pairs from nested_dims are used."},
+    )
+    stage1_projection_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-projection loss weights. Format: '1024->768:1.0,1024->512:0.8' (or '1024:768:1.0')."},
     )
     align_l1_weight: float = field(
         default=1.0,
