@@ -122,19 +122,32 @@ class OneModelTrainer(nn.Module):
 
         valid_dims = sorted({int(d) for d in nested_dims if int(d) <= int(full_dim)} | {int(full_dim)})
         desc_dims = sorted(valid_dims, reverse=True)
-        teacher_source = str(getattr(self.training_args, "stage1_teacher_source", "previous")).strip().lower()
+        projection_spec = str(getattr(self.training_args, "stage1_projection_spec", "")).strip()
         dimension_pairs = []
-        if teacher_source in {"previous", "both"}:
-            dimension_pairs.extend(
-                (int(desc_dims[i]), int(desc_dims[i + 1]))
-                for i in range(len(desc_dims) - 1)
-            )
-        if teacher_source in {"full", "both"}:
-            full_teacher_dim = int(desc_dims[0])
-            dimension_pairs.extend(
-                (full_teacher_dim, int(student_dim))
-                for student_dim in desc_dims[1:]
-            )
+        if projection_spec:
+            for item in projection_spec.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if "->" in item:
+                    src_str, dst_str = item.split("->", 1)
+                else:
+                    parts = item.split(":")
+                    if len(parts) != 2:
+                        raise ValueError(
+                            f"Invalid stage1 projection entry '{item}'. Use '1024->768' (or '1024:768')."
+                        )
+                    src_str, dst_str = parts
+                src_dim = int(src_str.strip())
+                dst_dim = int(dst_str.strip())
+                if src_dim > dst_dim and src_dim in valid_dims and dst_dim in valid_dims:
+                    dimension_pairs.append((src_dim, dst_dim))
+        else:
+            # Default: all valid larger->smaller pairs.
+            for src_dim in desc_dims:
+                for dst_dim in desc_dims:
+                    if src_dim > dst_dim:
+                        dimension_pairs.append((int(src_dim), int(dst_dim)))
         dimension_pairs = list(dict.fromkeys(dimension_pairs))
 
         self.model.matryoshka_proj_bank = PairwiseProjectionBank(dimension_pairs).to(self.device)
