@@ -1,0 +1,22 @@
+{
+    "768": {
+        "enabled": true,
+        "structure": "768-896"
+    },
+    "512": {
+        "enabled": true,
+        "structure": "512-896"
+    },
+    "256":{
+        "enabled": true,
+        "structure": "256-896"
+    },
+    "128":{
+        "enabled": true,
+        "structure": "128-896"
+    },
+    "64":{
+        "enabled": true,
+        "structure": "64-896"
+    }
+}

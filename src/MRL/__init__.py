@@ -1,11 +1,11 @@
-from .mrl_er import MatryoshkaERLoss
+from .eofd import EOFDLoss
 from .base_mrl import MatryoshkaContrastiveLoss
 from .ese import ESELoss
 
 criterion_dict = {
     "mrl": MatryoshkaContrastiveLoss,
     "ese": ESELoss,
-    "mrl_er": MatryoshkaERLoss,  # Sử dụng cùng class nhưng sẽ có thêm phần effective rank penalty
+    "eofd": EOFDLoss,  # Sử dụng cùng class nhưng sẽ có thêm phần effective rank penalty
 }
 
 def build_criterion(args):
