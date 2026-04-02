@@ -120,8 +120,8 @@ class OneModelTrainer(nn.Module):
                 projector_config = json.load(f)
             
             name_dict = {
-                "s": self.student_hidden_dim,
-                "t": self.teacher_hidden_dim,
+                "s": self.model_args.student_hidden_dim,
+                "t": self.model_args.teacher_hidden_dim,
                 "relu": nn.ReLU()
             }
 
