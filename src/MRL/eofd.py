@@ -38,8 +38,8 @@ class EOFDLoss(nn.Module):
         student_input_pos = input_data['pos']
 
         # Encode query and positive — get full-dim embeddings (unnormalized)
-        student_qry_output = model.encode_input(input_data)
-        student_pos_output = model.encode_input(input_data)
+        student_qry_output = model.encode_input(student_input_qry)
+        student_pos_output = model.encode_input(student_input_pos)
 
         student_qry_reps, student_qry_image_features, student_qry_attention, student_qry_hidden_states = student_qry_output
         student_pos_reps, student_pos_image_features, student_pos_attention, student_pos_hidden_states = student_pos_output
