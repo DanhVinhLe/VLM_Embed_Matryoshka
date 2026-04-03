@@ -39,6 +39,9 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         self.orthogonal_pair_weights = self._parse_pair_weight_map(getattr(args, "orthogonal_pair_weights", ""))
         self.projection_weights = self._parse_pair_weight_map(getattr(args, "stage1_projection_weights", ""))
         self.dim_align_l1_weights = self._parse_dim_weight_map(getattr(args, "align_l1_weights", ""))
+        self.spectrum_kl_weight = float(getattr(args, "spectrum_kl_weight", 0.0))
+        self.spectrum_kl_eps = float(getattr(args, "spectrum_kl_eps", 1e-8))
+        self.spectrum_kl_pair_weights = self._parse_pair_weight_map(getattr(args, "spectrum_kl_pair_weights", ""))
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -259,6 +262,56 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             out.append((src_dim, dst_dim))
         return out
 
+    def _spectral_distribution(self, rep_matrix: Tensor) -> Tensor:
+        """
+        Build normalized singular-value spectrum from a batch matrix.
+        Input shape: [batch_like, dim].
+        Output shape: [dim], sums to 1.
+        """
+        singular_values = torch.linalg.svdvals(rep_matrix)
+        spectrum = singular_values.pow(2)
+        spectrum = spectrum / spectrum.sum().clamp_min(self.spectrum_kl_eps)
+        return spectrum
+
+    def _adjacent_spectrum_kl_loss(self, qry_full: Tensor, pos_full: Tensor, dims: List[int]) -> Tensor:
+        """
+        Concatenate one batch of query/positive reps into one matrix per dim,
+        then compute KL between spectra of adjacent dimensions.
+        """
+        if len(dims) < 2:
+            return torch.zeros((), device=qry_full.device, dtype=qry_full.dtype)
+
+        asc_dims = sorted(dims)
+        pair_losses = []
+        pair_weights = []
+        for small_dim, large_dim in zip(asc_dims[:-1], asc_dims[1:]):
+            small_rep = torch.cat([qry_full[:, :small_dim], pos_full[:, :small_dim]], dim=0)
+            large_rep = torch.cat([qry_full[:, :large_dim], pos_full[:, :large_dim]], dim=0)
+
+            small_spec = self._spectral_distribution(small_rep)
+            large_spec = self._spectral_distribution(large_rep)[:small_dim]
+            large_spec = large_spec / large_spec.sum().clamp_min(self.spectrum_kl_eps)
+
+            kl_loss = F.kl_div(
+                large_spec.clamp_min(self.spectrum_kl_eps).log(),
+                small_spec.clamp_min(self.spectrum_kl_eps),
+                reduction="batchmean",
+            )
+            pair_losses.append(kl_loss)
+            pair_weights.append(
+                self._resolve_pair_weight(
+                    self.spectrum_kl_pair_weights,
+                    large_dim,
+                    small_dim,
+                    default=1.0,
+                )
+            )
+
+        loss_stack = torch.stack(pair_losses)
+        weight_tensor = torch.tensor(pair_weights, device=loss_stack.device, dtype=loss_stack.dtype)
+        weighted_loss = (loss_stack * weight_tensor).sum() / weight_tensor.sum().clamp_min(self.spectrum_kl_eps)
+        return weighted_loss
+
     def forward(self, model_trainer, input_data: Dict[str, Dict[str, Tensor]]) -> Dict[str, Tensor]:
         model = model_trainer.model
         qry_input = input_data["qry"]
@@ -312,11 +365,15 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
                 bigger_dim=desc_dims[0],
             )
             weighted_align_loss = align_ce + self.full_dim_l1_weight * align_l1
-            metrics["loss"] = weighted_align_loss
-            metrics["total_loss"] = weighted_align_loss.detach()
+            spectrum_kl_loss = self._adjacent_spectrum_kl_loss(qry_full, pos_full, valid_dims)
+            total_loss = weighted_align_loss + self.spectrum_kl_weight * spectrum_kl_loss
+            metrics["loss"] = total_loss
+            metrics["total_loss"] = total_loss.detach()
             metrics["contrastive_loss"] = weighted_align_loss.detach()
             metrics["align_loss"] = weighted_align_loss.detach()
             metrics["orthogonal_loss"] = torch.zeros_like(weighted_align_loss).detach()
+            metrics["spectrum_kl_loss"] = spectrum_kl_loss.detach()
+            metrics["spectrum_kl_weight"] = torch.tensor(self.spectrum_kl_weight, device=weighted_align_loss.device)
             return metrics
 
         for idx in selected_ids:
@@ -370,6 +427,9 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         final_loss = torch.stack(losses).mean()
         mean_align_loss = torch.stack(align_losses).mean()
         mean_orth_loss = torch.stack(orth_losses).mean()
+        spectrum_kl_loss = self._adjacent_spectrum_kl_loss(qry_full, pos_full, valid_dims)
+
+        final_loss = final_loss + self.spectrum_kl_weight * spectrum_kl_loss
 
         # Keep `contrastive_loss` for compatibility with existing trainer logging.
         metrics["loss"] = final_loss
@@ -377,6 +437,8 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         metrics["contrastive_loss"] = mean_align_loss
         metrics["align_loss"] = mean_align_loss.detach()
         metrics["orthogonal_loss"] = mean_orth_loss.detach()
+        metrics["spectrum_kl_loss"] = spectrum_kl_loss.detach()
+        metrics["spectrum_kl_weight"] = torch.tensor(self.spectrum_kl_weight, device=final_loss.device)
         return metrics
 
 
