@@ -38,4 +38,6 @@ torchrun \
     --full_dim_l1_weight 0.0 \
     --align_l1_weights "64:0.6,128:0.6,256:0.6,512:0.6,768:0.6" \
     --orthogonal_weight 0.01 \
+    --spectrum_kl_weight 0.05 \
+    --spectrum_kl_pair_weights "896->768:1.0,768->512:1.0,512->256:0.8,256->128:0.8,128->64:0.6" \
     #--orthogonal_pair_weights "896->768:0.01,768->512:0.01,512->256:0.01,256->128:0.01,128->64:0.01"
