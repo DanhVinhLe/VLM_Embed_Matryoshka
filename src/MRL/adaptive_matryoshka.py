@@ -268,7 +268,10 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         Input shape: [batch_like, dim].
         Output shape: [dim], sums to 1.
         """
-        singular_values = torch.linalg.svdvals(rep_matrix)
+        # torch.linalg.svd/svdvals on CUDA does not support bfloat16 directly.
+        # Run SVD in float32, then continue in the caller's tensor dtype/device context.
+        svd_input = rep_matrix.float() if rep_matrix.dtype in (torch.bfloat16, torch.float16) else rep_matrix
+        singular_values = torch.linalg.svdvals(svd_input)
         spectrum = singular_values.pow(2)
         spectrum = spectrum / spectrum.sum().clamp_min(self.spectrum_kl_eps)
         return spectrum
