@@ -158,6 +158,18 @@ class TrainingArguments(TrainingArguments):
         default="",
         metadata={"help": "Optional per-projection orthogonality weights. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
     )
+    spectrum_kl_weight: float = field(
+        default=0.0,
+        metadata={"help": "Global weight for adjacent-dimension SVD spectrum KL regularization in Adaptive Matryoshka Stage-1."},
+    )
+    spectrum_kl_eps: float = field(
+        default=1e-8,
+        metadata={"help": "Numerical stability epsilon for SVD-spectrum normalization and KL in Adaptive Matryoshka Stage-1."},
+    )
+    spectrum_kl_pair_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-adjacent-pair weights for spectrum KL. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
+    )
     router_alpha: float = field(
         default=0.01,
         metadata={"help": "Compute penalty weight for Adaptive Matryoshka Stage-2 router training."},
