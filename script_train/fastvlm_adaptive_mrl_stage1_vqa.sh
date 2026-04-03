@@ -16,7 +16,7 @@ torchrun \
     --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
-    --output_dir training/AdaptiveMRL_fastVLM_stage1_2 \
+    --output_dir training/AdaptiveMRL_fastVLM_combine \
     --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --learning_rate 5e-5 \
@@ -39,5 +39,5 @@ torchrun \
     --align_l1_weights "64:0.6,128:0.6,256:0.6,512:0.6,768:0.6" \
     --orthogonal_weight 0.01 \
     --spectrum_kl_weight 0.05 \
-    --spectrum_kl_pair_weights "896->768:1.0,768->512:1.0,512->256:0.8,256->128:0.8,128->64:0.6" \
+    --spectrum_kl_pair_weights "896->768:0.6,768->512:0.6,512->256:0.4,256->128:0.4,128->64:0.2" \
     #--orthogonal_pair_weights "896->768:0.01,768->512:0.01,512->256:0.01,256->128:0.01,128->64:0.01"
