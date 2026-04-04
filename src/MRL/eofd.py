@@ -4,7 +4,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor
 from typing import List, Dict
-from utils import count_clean_text_tokens, get_unpadded_hidden
+from .utils import count_clean_text_tokens, get_unpadded_hidden
 
 
 class EOFDLoss(nn.Module):
@@ -169,20 +169,23 @@ class EOFDLoss(nn.Module):
 
         # 4. Nâng lên lũy thừa p để tạo trọng số tập trung (EOFD weights)
         weight_qry = std_scaled_qry ** power
-        weight_pos = std_scaled_pos ** power        
+        weight_pos = std_scaled_pos ** power   
+
+        weight_qry = weight_qry.unsqueeze(0)  # [1, hidden_dim]
+        weight_pos = weight_pos.unsqueeze(0)  # [1, hidden_dim]   
 
         cnt = 0
         kd_loss = 0.0
         for dim in self.nested_dims:
-            if dim > full_dim:
+            if dim >= full_dim:
                 continue
             cnt += 1
             q = projectors[f'{dim}'](valid_qry_tokens[:, :dim])
             p = projectors[f'{dim}'](valid_pos_tokens[:, :dim])
-            q = F.normalize(q, p=2, dim=1) # [b, d]
-            p = F.normalize(p, p=2, dim=1) # [b, d]
-            weighted_squared_diff = (weight_qry * (valid_qry_tokens - q) ** 2 + weight_pos * (valid_pos_tokens - p) ** 2) * 0.5  # [num_valid_tokens, hidden_dim]
-            kd_loss += weighted_squared_diff.mean()
+            qry_diff = weight_qry * (valid_qry_tokens - q) ** 2
+            pos_diff = weight_pos * (valid_pos_tokens - p) ** 2
+            weighted_squared_diff = (qry_diff.mean() + pos_diff.mean()) * 0.5  # [num_valid_tokens, hidden_dim]
+            kd_loss += weighted_squared_diff
 
         if cnt > 0:
             kd_loss = kd_loss / cnt
