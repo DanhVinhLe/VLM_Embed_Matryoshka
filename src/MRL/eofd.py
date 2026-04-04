@@ -190,8 +190,8 @@ class EOFDLoss(nn.Module):
             q_norm = F.normalize(q, p=2, dim=1)
             p_norm = F.normalize(p, p=2, dim=1)
 
-            qry_diff = weight_qry * (valid_q_norm - q_norm) ** 2
-            pos_diff = weight_pos * (valid_p_norm - p_norm) ** 2
+            qry_diff = weight_qry * (valid_q_norm - q_norm).abs()
+            pos_diff = weight_pos * (valid_p_norm - p_norm).abs()
             weighted_squared_diff = (qry_diff.mean() + pos_diff.mean()) * 0.5  # [num_valid_tokens, hidden_dim]
             kd_loss += weighted_squared_diff
 
