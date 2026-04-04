@@ -175,6 +175,9 @@ class EOFDLoss(nn.Module):
         weight_qry = weight_qry.unsqueeze(0)  # [1, hidden_dim]
         weight_pos = weight_pos.unsqueeze(0)  # [1, hidden_dim]   
 
+        valid_q_norm = F.normalize(valid_qry_tokens.float(), p=2, dim=1)
+        valid_p_norm = F.normalize(valid_pos_tokens.float(), p=2, dim=1)
+
         cnt = 0
         kd_loss = 0.0
         for dim in self.nested_dims:
@@ -183,8 +186,12 @@ class EOFDLoss(nn.Module):
             cnt += 1
             q = projectors[f'{dim}'](valid_qry_tokens[:, :dim])
             p = projectors[f'{dim}'](valid_pos_tokens[:, :dim])
-            qry_diff = weight_qry * (valid_qry_tokens - q) ** 2
-            pos_diff = weight_pos * (valid_pos_tokens - p) ** 2
+
+            q_norm = F.normalize(q, p=2, dim=1)
+            p_norm = F.normalize(p, p=2, dim=1)
+
+            qry_diff = weight_qry * (valid_q_norm - q_norm) ** 2
+            pos_diff = weight_pos * (valid_p_norm - p_norm) ** 2
             weighted_squared_diff = (qry_diff.mean() + pos_diff.mean()) * 0.5  # [num_valid_tokens, hidden_dim]
             kd_loss += weighted_squared_diff
 
