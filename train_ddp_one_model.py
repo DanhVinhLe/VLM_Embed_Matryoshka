@@ -218,7 +218,7 @@ def main():
                                     training_args, 
                                     device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     collator = TrainOneModelCollator(
-        processor=model_trainer.get_processor(),
+        processor=model_trainer.processor,
         model_args=model_args,
         data_args=data_args,
         training_args=training_args,

@@ -4,6 +4,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor
 from typing import List, Dict
+from utils import count_clean_text_tokens, get_unpadded_hidden
 
 
 class EOFDLoss(nn.Module):
@@ -33,6 +34,8 @@ class EOFDLoss(nn.Module):
         self.model_trainer = model_trainer
         model = model_trainer.model
         projectors = model_trainer.projectors
+        processor = model_trainer.processor
+        tokenizer = processor.tokenizer
 
         student_input_qry = input_data['qry']
         student_input_pos = input_data['pos']
@@ -79,16 +82,76 @@ class EOFDLoss(nn.Module):
 
         if self.average_loss and num_dims > 0:
             contrastive_loss = contrastive_loss / num_dims
+
+        student_special_ids = torch.tensor(
+            list(set(list(tokenizer.added_tokens_encoder.values()) +
+                    tokenizer.all_special_ids)),
+            device=device,
+            dtype=torch.long
+        )
+
+        num_student_text_qry_tokens = count_clean_text_tokens(student_input_qry, student_special_ids)
+        num_student_text_pos_tokens = count_clean_text_tokens(student_input_pos, student_special_ids)
+
+        cur_idx_qry_img = 0
+        cur_idx_pos_img = 0
+
+        valid_qry_tokens = []
+        valid_pos_tokens = []
+
+        for i in range(bs):
+            # 1. QUERY Processing
+            if student_qry_image_features is not None and \
+                cur_idx_qry_img < len(student_qry_image_features):
+                # --- Vision ---
+                stu_feat = student_qry_image_features[cur_idx_qry_img]
         
+                # --- Text (Multimedia case) ---
+                last_unpadded_hidden_state = get_unpadded_hidden(
+                    student_qry_hidden_states[-1][i],
+                    num_student_text_qry_tokens[i].item(),
+                    stu_feat.size(0),
+                    student_input_qry['attention_mask'][i]
+                )
+                valid_qry_tokens.append(last_unpadded_hidden_state)
+                cur_idx_qry_img += 1
+            else:
+                # --- Text Only case ---
+                last_unpadded_hidden_state = get_unpadded_hidden(
+                    student_qry_hidden_states[-1][i],
+                    num_student_text_qry_tokens[i].item(),
+                    0,
+                    student_input_qry['attention_mask'][i]
+                )
+                valid_qry_tokens.append(last_unpadded_hidden_state)
 
-        last_hidden_qry_token = student_qry_hidden_states[-1]  # [batch_size, seq_len, hidden_dim]
-        last_hidden_pos_token = student_pos_hidden_states[-1]  # [batch_size, seq_len, hidden_dim]
+            # 2. POS Processing
+            if student_pos_image_features is not None and \
+                cur_idx_pos_img < len(student_pos_image_features):
+                # --- Vision ---
+                stu_feat = student_pos_image_features[cur_idx_pos_img]
+        
+                # --- Text (Multimedia case) ---
+                last_unpadded_hidden_state = get_unpadded_hidden(
+                    student_pos_hidden_states[-1][i],
+                    num_student_text_pos_tokens[i].item(),
+                    stu_feat.size(0),
+                    student_input_pos['attention_mask'][i]
+                )
+                valid_pos_tokens.append(last_unpadded_hidden_state)
+                cur_idx_pos_img += 1
+            else:
+                # --- Text Only case ---
+                last_unpadded_hidden_state = get_unpadded_hidden(
+                    student_pos_hidden_states[-1][i],
+                    num_student_text_pos_tokens[i].item(),
+                    0,
+                    student_input_pos['attention_mask'][i]
+                )
+                valid_pos_tokens.append(last_unpadded_hidden_state)
 
-        qry_mask = student_input_qry['attention_mask'].bool()
-        pos_mask = student_input_pos['attention_mask'].bool()
-
-        valid_qry_tokens = last_hidden_qry_token[qry_mask] # [num_valid_qry_tokens, hidden_dim]
-        valid_pos_tokens = last_hidden_pos_token[pos_mask]
+        valid_qry_tokens = torch.cat(valid_qry_tokens, dim=0)  # [num_valid_tokens, hidden_dim]
+        valid_pos_tokens = torch.cat(valid_pos_tokens, dim=0)  # [num_valid_tokens, hidden_dim]
 
         std_qry = valid_qry_tokens.std(dim=0, unbiased=False) # [hidden_dim]
         std_pos = valid_pos_tokens.std(dim=0, unbiased=False)
@@ -106,11 +169,7 @@ class EOFDLoss(nn.Module):
 
         # 4. Nâng lên lũy thừa p để tạo trọng số tập trung (EOFD weights)
         weight_qry = std_scaled_qry ** power
-        weight_pos = std_scaled_pos ** power
-
-        weight_qry = weight_qry.unsqueeze(0)  # [1, hidden_dim]
-        weight_pos = weight_pos.unsqueeze(0)  # [1, hidden_dim]
-
+        weight_pos = std_scaled_pos ** power        
 
         cnt = 0
         kd_loss = 0.0

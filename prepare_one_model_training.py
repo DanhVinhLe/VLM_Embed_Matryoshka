@@ -94,6 +94,7 @@ class OneModelTrainer(nn.Module):
         self.device = device
         self.model = self._load_model()
         self.temperature = model_args.temperature
+        self.processor = self.get_processor()
         self.set_projector()
     
     def _load_model(self):
