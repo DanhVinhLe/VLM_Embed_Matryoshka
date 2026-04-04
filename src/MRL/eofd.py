@@ -164,8 +164,9 @@ class EOFDLoss(nn.Module):
         mean_std_pos = std_pos.mean()
 
         # 3. Chuẩn hóa (chia std của từng chiều cho giá trị trung bình)
-        std_scaled_qry = std_qry / mean_std_qry
-        std_scaled_pos = std_pos / mean_std_pos
+        eps = 1e-8
+        std_scaled_qry = std_qry / (mean_std_qry + eps)
+        std_scaled_pos = std_pos / (mean_std_pos + eps)
 
         # 4. Nâng lên lũy thừa p để tạo trọng số tập trung (EOFD weights)
         weight_qry = std_scaled_qry ** power
