@@ -21,6 +21,7 @@ class EOFDLoss(nn.Module):
         else:
             self.world_size = 1
             self.process_rank = 0
+        self.lambda_ortho = 1e-3
             
     def _dist_gather_tensor(self, t: Tensor):
         t = t.contiguous()
@@ -29,6 +30,34 @@ class EOFDLoss(nn.Module):
         all_tensors[self.process_rank] = t
         all_tensors = torch.cat(all_tensors, dim=0)
         return all_tensors
+    
+    def get_orthogonal_loss(self, projectors):
+        ortho_loss = 0.0
+        num_linear_layers = 0
+        
+        for proj_name, projector_seq in projectors.items():
+            for module in projector_seq.modules():
+                if isinstance(module, nn.Linear):
+                    W = module.weight
+                    out_dim, in_dim = W.shape
+                    
+                    if out_dim <= in_dim:
+                        w_w_t = torch.matmul(W, W.t())
+                        identity = torch.eye(out_dim, device=W.device, dtype=W.dtype)
+                        # Dùng MSE để lấy trung bình trên từng phần tử ma trận
+                        ortho_loss += F.mse_loss(w_w_t, identity)
+                    else:
+                        w_t_w = torch.matmul(W.t(), W)
+                        identity = torch.eye(in_dim, device=W.device, dtype=W.dtype)
+                        ortho_loss += F.mse_loss(w_t_w, identity)
+                    
+                    num_linear_layers += 1
+                    
+        # Lấy trung bình trên tổng số lớp Linear
+        if num_linear_layers > 0:
+            ortho_loss = ortho_loss / num_linear_layers
+            
+        return ortho_loss
 
     def forward(self, model_trainer, input_data):
         self.model_trainer = model_trainer
@@ -178,6 +207,9 @@ class EOFDLoss(nn.Module):
         valid_q_norm = F.normalize(valid_qry_tokens.float(), p=2, dim=1)
         valid_p_norm = F.normalize(valid_pos_tokens.float(), p=2, dim=1)
 
+        valid_q_norm_detach = valid_q_norm.detach()
+        valid_p_norm_detach = valid_p_norm.detach()
+
         cnt = 0
         kd_loss = 0.0
         for dim in self.nested_dims:
@@ -190,20 +222,23 @@ class EOFDLoss(nn.Module):
             q_norm = F.normalize(q, p=2, dim=1)
             p_norm = F.normalize(p, p=2, dim=1)
 
-            qry_diff = weight_qry * (valid_q_norm - q_norm).abs()
-            pos_diff = weight_pos * (valid_p_norm - p_norm).abs()
+            qry_diff = weight_qry * (valid_q_norm_detach - q_norm).abs()
+            pos_diff = weight_pos * (valid_p_norm_detach - p_norm).abs()
             weighted_squared_diff = (qry_diff.mean() + pos_diff.mean()) * 0.5  # [num_valid_tokens, hidden_dim]
             kd_loss += weighted_squared_diff
 
         if cnt > 0:
             kd_loss = kd_loss / cnt
-        
-        total_loss = contrastive_loss + self.kd_weight * kd_loss
+
+        orthogonal_loss = self.get_orthogonal_loss(projectors)  # Tính loss orthogonal và có thể thêm vào kd_loss nếu muốn
+
+        total_loss = contrastive_loss + self.kd_weight * kd_loss + self.lambda_ortho * orthogonal_loss
 
         result = {
             "loss": total_loss,
             "contrastive_loss": contrastive_loss,
-            "kd_loss": kd_loss
+            "kd_loss": kd_loss,
+            "orthogonal_loss": orthogonal_loss
         }
         result.update(dim_losses)
 
