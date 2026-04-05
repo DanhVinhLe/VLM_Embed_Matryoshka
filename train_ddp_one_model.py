@@ -124,6 +124,7 @@ class Trainer:
         total_losses, contrastive_losses = [], []
         effective_rank_losses = []
         kd_losses = []
+        orthogonal_losses = []
         
         progress_bar = tqdm(total=len(self.train_data.dataset) // self.training_args.per_device_train_batch_size // self.training_args.gradient_accumulation_steps // dist.get_world_size(), 
                             desc=f"Epoch {epoch}",
@@ -137,16 +138,19 @@ class Trainer:
             contrastive_loss = loss_dict['contrastive_loss']
             effective_rank_loss = loss_dict.get('effective_rank_loss', torch.tensor(0.0, device=self.device))
             kd_loss = loss_dict.get('kd_loss', torch.tensor(0.0, device=self.device))
+            orthogonal_loss = loss_dict.get('orthogonal_loss', torch.tensor(0.0, device=self.device))
 
             total_losses.append(loss_dict['loss'].detach().item())
             contrastive_losses.append(contrastive_loss.detach().item())
             effective_rank_losses.append(effective_rank_loss.detach().item())
             kd_losses.append(kd_loss.detach().item())
+            orthogonal_losses.append(orthogonal_loss.detach().item())
             
             
             batch_loss = sum(total_losses)/len(total_losses)
             batch_contrastive_loss = sum(contrastive_losses)/len(contrastive_losses)
             batch_effective_rank_loss = sum(effective_rank_losses)/len(effective_rank_losses)
+            batch_orthogonal_loss = sum(orthogonal_losses)/len(orthogonal_losses)
             batch_kd_loss = sum(kd_losses)/len(kd_losses)
             
             total_loss.backward()
@@ -161,6 +165,7 @@ class Trainer:
                         "contrastive_loss": f"{batch_contrastive_loss:.4f}",
                         "effective_rank_loss": f"{batch_effective_rank_loss:.4f}",
                         "kd_loss": f"{batch_kd_loss:.4f}",
+                        "orthogonal_loss": f"{batch_orthogonal_loss:.4f}",
                         "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}"
                     })
                     progress_bar.update(1)
