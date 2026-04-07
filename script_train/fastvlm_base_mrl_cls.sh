@@ -13,10 +13,10 @@ torchrun \
     --normalize True \
     --temperature 0.02 \
     --dataset_name "TIGER-Lab/MMEB-train" \
-    --subset_name "ImageNet_1K" "N24News" "HatefulMemes" "VOC2007" "SUN397" \
+    --subset_name "ImageNet_1K" "N24News" "SUN397" "HatefulMemes" "VOC2007" \
     --dataset_split "original" \
     --image_dir "vlm2vec_train/MMEB-train" \
-    --output_dir "training/EOFD_fastVLM_cls_b8_project_adjacent_unnorm_orthogonal_maxdim_detach" \
+    --output_dir "training/MRL_fastVLM_cls_b16" \
     --per_device_train_batch_size 8 \
     --gradient_accumulation_steps 1 \
     --kd_loss_type "mrl" \
@@ -29,10 +29,7 @@ torchrun \
     --save_strategy "epoch" \
     --seed 42 \
     --weight_decay 0.01 \
-    --kd_loss_type eofd \
+    --kd_loss_type mrl \
     --warmup_ratio 0.03 \
     --image_resolution mid \
-    --nested_dims 64 128 256 512 768 896 \
-    --projector_config_path "config/adjacent_proj.json" \
-    --projector_lr 5e-5 \
-    --kd_weight 0.1
+    --nested_dims 64 128 256 512 768 896

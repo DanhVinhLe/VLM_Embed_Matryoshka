@@ -93,8 +93,8 @@ class EOFDLoss(nn.Module):
         contrastive_loss = 0.0
         num_dims = 0
         dim_losses = {}
-
-        for dim in self.nested_dims:
+        nested_dims = sorted(self.nested_dims)
+        for dim in nested_dims:
             if dim > full_dim:
                 break
 
@@ -204,26 +204,30 @@ class EOFDLoss(nn.Module):
         weight_qry = weight_qry.unsqueeze(0)  # [1, hidden_dim]
         weight_pos = weight_pos.unsqueeze(0)  # [1, hidden_dim]   
 
-        valid_q_norm = F.normalize(valid_qry_tokens.float(), p=2, dim=1)
-        valid_p_norm = F.normalize(valid_pos_tokens.float(), p=2, dim=1)
+        # valid_q_norm = F.normalize(valid_qry_tokens.float(), p=2, dim=1)
+        # valid_p_norm = F.normalize(valid_pos_tokens.float(), p=2, dim=1)
 
-        valid_q_norm_detach = valid_q_norm.detach()
-        valid_p_norm_detach = valid_p_norm.detach()
+        # valid_q_norm_detach = valid_q_norm.detach()
+        # valid_p_norm_detach = valid_p_norm.detach()
+
+        valid_q_detach = valid_qry_tokens.detach()
+        valid_p_detach = valid_pos_tokens.detach()
 
         cnt = 0
         kd_loss = 0.0
-        for dim in self.nested_dims:
+        for i, dim in enumerate(nested_dims):
             if dim >= full_dim:
                 continue
             cnt += 1
-            q = projectors[f'{dim}'](valid_qry_tokens[:, :dim])
-            p = projectors[f'{dim}'](valid_pos_tokens[:, :dim])
+            adjacent_dim = nested_dims[i+1] if i < len(nested_dims) - 1 else dim
+            q = projectors[f'{dim}_{adjacent_dim}'](valid_qry_tokens[:, :dim])
+            p = projectors[f'{dim}_{adjacent_dim}'](valid_pos_tokens[:, :dim])
 
-            q_norm = F.normalize(q, p=2, dim=1)
-            p_norm = F.normalize(p, p=2, dim=1)
+            # q_norm = F.normalize(q, p=2, dim=1)
+            # p_norm = F.normalize(p, p=2, dim=1)
 
-            qry_diff = weight_qry * (valid_q_norm_detach - q_norm).abs()
-            pos_diff = weight_pos * (valid_p_norm_detach - p_norm).abs()
+            qry_diff = weight_qry[:adjacent_dim] * (valid_q_detach - q).abs()
+            pos_diff = weight_pos[:adjacent_dim] * (valid_p_detach - p).abs()
             weighted_squared_diff = (qry_diff.mean() + pos_diff.mean()) * 0.5  # [num_valid_tokens, hidden_dim]
             kd_loss += weighted_squared_diff
 
