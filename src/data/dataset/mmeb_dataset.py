@@ -309,7 +309,7 @@ class EvalDataset(Dataset):
         if resolution == "high":
             image = image.resize((1344, 1344))
         else:
-            image = image.resize((336, 336))
+            image = image.resize((1024, 1024))
         return image
 
     def _get_image(self, img_path):

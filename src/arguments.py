@@ -87,6 +87,10 @@ class TrainingArguments(TrainingArguments):
         default="adamw",
         metadata={"help": "Optimizer for train_ddp_one_model.py. Supported: adamw, moon (alias: muon, backed by torch.optim.Muon)."},
     )
+    moon_non_2d_strategy: str = field(
+        default="hybrid",
+        metadata={"help": "When optimizer_name=moon and non-2D params exist: hybrid (Muon+AdamW), skip (Muon-only on 2D params), or error."},
+    )
     image_encoder_freeze: bool = field(default=False, metadata={"help": "huggingface model name"})
     output_dir: str = field(default=None, metadata={"help": "directory for saving trained models"})
     resume_from: str = field(default="none", metadata={"help": "`auto` will detect if any previous checkpoints should be resumed. or specify specific step of the checkpoint."})
@@ -126,9 +130,13 @@ class TrainingArguments(TrainingArguments):
         default="all",
         metadata={"help": "Adaptive Matryoshka Stage-1 curriculum stage selector: ALL, comma-separated indices (e.g. 0,2), or labels (A,B,C,...) mapped to nested_dims order."},
     )
-    stage1_teacher_source: str = field(
-        default="previous",
-        metadata={"help": "Teacher source for adaptive Stage-1 losses: previous, full, or both."},
+    stage1_projection_spec: str = field(
+        default="",
+        metadata={"help": "Optional explicit Stage-1 projection graph. Format: '1024->768,1024->512,768->512'. If empty, all valid larger->smaller pairs from nested_dims are used."},
+    )
+    stage1_projection_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-projection loss weights. Format: '1024->768:1.0,1024->512:0.8' (or '1024:768:1.0')."},
     )
     align_l1_weight: float = field(
         default=1.0,
@@ -149,6 +157,18 @@ class TrainingArguments(TrainingArguments):
     orthogonal_pair_weights: str = field(
         default="",
         metadata={"help": "Optional per-projection orthogonality weights. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
+    )
+    spectrum_kl_weight: float = field(
+        default=0.0,
+        metadata={"help": "Global weight for adjacent-dimension SVD spectrum KL regularization in Adaptive Matryoshka Stage-1."},
+    )
+    spectrum_kl_eps: float = field(
+        default=1e-8,
+        metadata={"help": "Numerical stability epsilon for SVD-spectrum normalization and KL in Adaptive Matryoshka Stage-1."},
+    )
+    spectrum_kl_pair_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-adjacent-pair weights for spectrum KL. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
     )
     router_alpha: float = field(
         default=0.01,

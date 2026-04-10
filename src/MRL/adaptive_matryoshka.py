@@ -19,12 +19,10 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
       3) Orthogonality regularization on each projection matrix (P^T P -> I).
 
     Supported prefix chain (default): [64, 128, 256, 512, 768, 1024].
-    Curriculum phases:
-      - A: align on full dim only.
-      - B: align 512 using trainable projection(s).
-      - C: align 256 using trainable projection(s).
-      - D: align 64  using trainable projection(s).
-      - all: sum all selected stages + orthogonality penalty.
+    Curriculum stage pairs are built from:
+      - explicit user projection graph (`stage1_projection_spec`), or
+      - all larger->smaller valid pairs from configured dims.
+    Multiple larger dimensions can project into the same smaller dimension.
     """
 
     def __init__(self, args):
@@ -34,16 +32,16 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         nested_dims = getattr(args, "nested_dims", None) or [64, 128, 256, 512, 768, 1024]
         self.nested_dims = sorted(set(nested_dims))
         self.phase = str(getattr(args, "stage1_phase", "all")).upper()
-        self.teacher_source = str(getattr(args, "stage1_teacher_source", "previous")).strip().lower()
-        if self.teacher_source not in {"previous", "full", "both"}:
-            raise ValueError(
-                f"Invalid stage1_teacher_source={self.teacher_source}. Use one of: previous, full, both"
-            )
+        self.projection_spec = str(getattr(args, "stage1_projection_spec", "")).strip()
         self.align_l1_weight = float(getattr(args, "align_l1_weight", 1.0))
         self.full_dim_l1_weight = float(getattr(args, "full_dim_l1_weight", 0.0))
         self.orthogonal_weight = float(getattr(args, "orthogonal_weight", 0.01))
         self.orthogonal_pair_weights = self._parse_pair_weight_map(getattr(args, "orthogonal_pair_weights", ""))
+        self.projection_weights = self._parse_pair_weight_map(getattr(args, "stage1_projection_weights", ""))
         self.dim_align_l1_weights = self._parse_dim_weight_map(getattr(args, "align_l1_weights", ""))
+        self.spectrum_kl_weight = float(getattr(args, "spectrum_kl_weight", 0.0))
+        self.spectrum_kl_eps = float(getattr(args, "spectrum_kl_eps", 1e-8))
+        self.spectrum_kl_pair_weights = self._parse_pair_weight_map(getattr(args, "spectrum_kl_pair_weights", ""))
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -223,6 +221,100 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             out[(src_dim, dst_dim)] = float(weight_spec.strip())
         return out
 
+    @staticmethod
+    def _resolve_pair_weight(weight_map: Dict[Tuple[int, int], float], src_dim: int, dst_dim: int, default: float = 1.0) -> float:
+        """
+        Resolve a pair weight with explicit fallback.
+        - If (src_dim, dst_dim) exists in `weight_map`, use it.
+        - Otherwise use `default`.
+        """
+        return float(weight_map.get((src_dim, dst_dim), default))
+
+    def _parse_projection_pairs(self, spec: str) -> List[Tuple[int, int]]:
+        """
+        Parse projection pair spec in formats:
+          - "1024->768,1024->512,768->512"
+          - "1024:768,1024:512"
+        """
+        out: List[Tuple[int, int]] = []
+        if not spec:
+            return out
+        for item in str(spec).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "->" in item:
+                src_str, dst_str = item.split("->", 1)
+            else:
+                parts = item.split(":")
+                if len(parts) != 2:
+                    raise ValueError(
+                        f"Invalid stage1 projection entry '{item}'. "
+                        f"Use '1024->768' (or '1024:768')."
+                    )
+                src_str, dst_str = parts
+            src_dim = int(src_str.strip())
+            dst_dim = int(dst_str.strip())
+            if src_dim <= dst_dim:
+                raise ValueError(
+                    f"Invalid projection pair {src_dim}->{dst_dim}. Source dim must be larger than destination dim."
+                )
+            out.append((src_dim, dst_dim))
+        return out
+
+    def _spectral_distribution(self, rep_matrix: Tensor) -> Tensor:
+        """
+        Build normalized singular-value spectrum from a batch matrix.
+        Input shape: [batch_like, dim].
+        Output shape: [dim], sums to 1.
+        """
+        # torch.linalg.svd/svdvals on CUDA does not support bfloat16 directly.
+        # Run SVD in float32, then continue in the caller's tensor dtype/device context.
+        svd_input = rep_matrix.float() if rep_matrix.dtype in (torch.bfloat16, torch.float16) else rep_matrix
+        singular_values = torch.linalg.svdvals(svd_input)
+        spectrum = singular_values.pow(2)
+        spectrum = spectrum / spectrum.sum().clamp_min(self.spectrum_kl_eps)
+        return spectrum
+
+    def _adjacent_spectrum_kl_loss(self, qry_full: Tensor, pos_full: Tensor, dims: List[int]) -> Tensor:
+        """
+        Concatenate one batch of query/positive reps into one matrix per dim,
+        then compute KL between spectra of adjacent dimensions.
+        """
+        if len(dims) < 2:
+            return torch.zeros((), device=qry_full.device, dtype=qry_full.dtype)
+
+        asc_dims = sorted(dims)
+        pair_losses = []
+        pair_weights = []
+        for small_dim, large_dim in zip(asc_dims[:-1], asc_dims[1:]):
+            small_rep = torch.cat([qry_full[:, :small_dim], pos_full[:, :small_dim]], dim=0)
+            large_rep = torch.cat([qry_full[:, :large_dim], pos_full[:, :large_dim]], dim=0)
+
+            small_spec = self._spectral_distribution(small_rep)
+            large_spec = self._spectral_distribution(large_rep)[:small_dim]
+            large_spec = large_spec / large_spec.sum().clamp_min(self.spectrum_kl_eps)
+
+            kl_loss = F.kl_div(
+                large_spec.clamp_min(self.spectrum_kl_eps).log(),
+                small_spec.clamp_min(self.spectrum_kl_eps),
+                reduction="batchmean",
+            )
+            pair_losses.append(kl_loss)
+            pair_weights.append(
+                self._resolve_pair_weight(
+                    self.spectrum_kl_pair_weights,
+                    large_dim,
+                    small_dim,
+                    default=1.0,
+                )
+            )
+
+        loss_stack = torch.stack(pair_losses)
+        weight_tensor = torch.tensor(pair_weights, device=loss_stack.device, dtype=loss_stack.dtype)
+        weighted_loss = (loss_stack * weight_tensor).sum() / weight_tensor.sum().clamp_min(self.spectrum_kl_eps)
+        return weighted_loss
+
     def forward(self, model_trainer, input_data: Dict[str, Dict[str, Tensor]]) -> Dict[str, Tensor]:
         model = model_trainer.model
         qry_input = input_data["qry"]
@@ -239,15 +331,24 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         valid_dims = self._resolve_dims(full_dim)
         target = self._build_contrastive_target(qry_full, pos_full)
 
-        # Build strict adjacent chain:
-        # full -> full/2 -> full/4 -> ...
-        # For FastVLM configured dims this becomes 896->768->512->256->128->64.
         desc_dims = sorted(valid_dims, reverse=True)
         stage_pairs: List[Tuple[int, int]] = []
-        for idx in range(len(desc_dims) - 1):
-            teacher_dim = desc_dims[idx]
-            student_dim = desc_dims[idx + 1]
-            stage_pairs.append((teacher_dim, student_dim))
+        if self.projection_spec:
+            parsed_pairs = self._parse_projection_pairs(self.projection_spec)
+            valid_dim_set = set(valid_dims)
+            stage_pairs = [
+                (src_dim, dst_dim)
+                for src_dim, dst_dim in parsed_pairs
+                if src_dim in valid_dim_set and dst_dim in valid_dim_set
+            ]
+        else:
+            # Default: all valid larger->smaller pairs.
+            for src_dim in desc_dims:
+                for dst_dim in desc_dims:
+                    if src_dim > dst_dim:
+                        stage_pairs.append((src_dim, dst_dim))
+        # remove duplicates while preserving order
+        stage_pairs = list(dict.fromkeys(stage_pairs))
 
         selected_ids = self._resolve_selected_stage_ids(stage_pairs)
 
@@ -267,11 +368,15 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
                 bigger_dim=desc_dims[0],
             )
             weighted_align_loss = align_ce + self.full_dim_l1_weight * align_l1
-            metrics["loss"] = weighted_align_loss
-            metrics["total_loss"] = weighted_align_loss.detach()
+            spectrum_kl_loss = self._adjacent_spectrum_kl_loss(qry_full, pos_full, valid_dims)
+            total_loss = weighted_align_loss + self.spectrum_kl_weight * spectrum_kl_loss
+            metrics["loss"] = total_loss
+            metrics["total_loss"] = total_loss.detach()
             metrics["contrastive_loss"] = weighted_align_loss.detach()
             metrics["align_loss"] = weighted_align_loss.detach()
             metrics["orthogonal_loss"] = torch.zeros_like(weighted_align_loss).detach()
+            metrics["spectrum_kl_loss"] = spectrum_kl_loss.detach()
+            metrics["spectrum_kl_weight"] = torch.tensor(self.spectrum_kl_weight, device=weighted_align_loss.device)
             return metrics
 
         for idx in selected_ids:
@@ -287,19 +392,35 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
 
             l1_weight = self.dim_align_l1_weights.get(student_dim, self.align_l1_weight)
             weighted_align_loss = align_ce + l1_weight * align_l1
+            projection_weight = self._resolve_pair_weight(
+                self.projection_weights,
+                teacher_dim,
+                student_dim,
+                default=1.0,
+            )
 
             if hasattr(model, "matryoshka_proj_bank"):
                 base_orth = model.matryoshka_proj_bank.orthogonality_loss(src_dim=teacher_dim, dst_dim=student_dim)
-                pair_weight = self.orthogonal_pair_weights.get((teacher_dim, student_dim), 1.0)
-                orth_loss = pair_weight * base_orth
+                orth_pair_weight = self._resolve_pair_weight(
+                    self.orthogonal_pair_weights,
+                    teacher_dim,
+                    student_dim,
+                    default=1.0,
+                )
+                orth_loss = orth_pair_weight * base_orth
             else:
+                orth_pair_weight = 1.0
                 orth_loss = torch.zeros_like(weighted_align_loss)
 
-            total = weighted_align_loss + self.orthogonal_weight * orth_loss
+            total = projection_weight * weighted_align_loss + self.orthogonal_weight * projection_weight * orth_loss
 
             metrics[f"align_ce_{teacher_dim}_to_{student_dim}"] = align_ce.detach()
             metrics[f"align_l1_{teacher_dim}_to_{student_dim}"] = align_l1.detach()
             metrics[f"align_l1_weight_{teacher_dim}_to_{student_dim}"] = torch.tensor(l1_weight, device=align_ce.device)
+            metrics[f"projection_weight_{teacher_dim}_to_{student_dim}"] = torch.tensor(projection_weight, device=align_ce.device)
+            metrics[f"orthogonal_pair_weight_{teacher_dim}_to_{student_dim}"] = torch.tensor(
+                orth_pair_weight, device=align_ce.device
+            )
             metrics[f"align_loss_{teacher_dim}_to_{student_dim}"] = weighted_align_loss.detach()
             metrics[f"orthogonal_loss_{teacher_dim}_to_{student_dim}"] = orth_loss.detach()
             losses.append(total)
@@ -309,6 +430,9 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         final_loss = torch.stack(losses).mean()
         mean_align_loss = torch.stack(align_losses).mean()
         mean_orth_loss = torch.stack(orth_losses).mean()
+        spectrum_kl_loss = self._adjacent_spectrum_kl_loss(qry_full, pos_full, valid_dims)
+
+        final_loss = final_loss + self.spectrum_kl_weight * spectrum_kl_loss
 
         # Keep `contrastive_loss` for compatibility with existing trainer logging.
         metrics["loss"] = final_loss
@@ -316,6 +440,8 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         metrics["contrastive_loss"] = mean_align_loss
         metrics["align_loss"] = mean_align_loss.detach()
         metrics["orthogonal_loss"] = mean_orth_loss.detach()
+        metrics["spectrum_kl_loss"] = spectrum_kl_loss.detach()
+        metrics["spectrum_kl_weight"] = torch.tensor(self.spectrum_kl_weight, device=final_loss.device)
         return metrics
 
 

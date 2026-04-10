@@ -48,6 +48,50 @@ Just run the scripts in folder `scripts`
 bash scripts/train_RKD.sh
 bash scripts/train_distill_propose_V.sh
 ```
+
+### Adaptive Matryoshka Stage-1: projection spec usage
+
+For `--kd_loss_type adaptive_mrl_stage1`, you can explicitly control which projection matrices are trained with:
+
+- `--stage1_projection_spec`: projection edges (`src_dim->dst_dim`)
+- `--stage1_projection_weights`: optional per-edge loss weights
+
+#### 1) Projection graph format
+
+Use comma-separated pairs, each pair must be `larger_dim->smaller_dim` (or `larger_dim:smaller_dim`):
+
+```bash
+--stage1_projection_spec "2048->1024,2048->512,1024->512,1024->256,512->256,256->64"
+```
+
+This allows multiple larger dims projecting to the same smaller dim (for example both `2048->512` and `1024->512`).
+
+If `--stage1_projection_spec ""` (empty), training defaults to **all valid larger->smaller pairs** from `--nested_dims` plus the model full dim.
+
+#### 2) Per-edge weight format
+
+Use comma-separated weighted edges:
+
+```bash
+--stage1_projection_weights "2048->1024:1.0,2048->512:0.7,1024->512:1.2,1024->256:0.9"
+```
+
+Any edge not listed gets default weight `1.0`.
+Likewise, if an edge is not listed in `--orthogonal_pair_weights`, that edge uses orthogonal pair weight `1.0` and still uses the global `--orthogonal_weight`.
+
+#### 3) Example command snippet
+
+```bash
+--kd_loss_type adaptive_mrl_stage1 \
+--nested_dims 64 128 256 512 1024 2048 \
+--stage1_phase all \
+--stage1_projection_spec "2048->1024,2048->512,1024->512,1024->256,512->256,256->128,128->64" \
+--stage1_projection_weights "2048->1024:1.0,2048->512:0.8,1024->512:1.0,1024->256:0.8,512->256:1.0,256->128:1.0,128->64:1.0" \
+--orthogonal_weight 0.01
+```
+
+Orthogonality regularization is still applied per active projection edge.
+
 ## Inference & Evaluation
 1. To evaluate our model on an MMEB dataset (e.g., MSCOCO_i2t), run:
 ```bash 
