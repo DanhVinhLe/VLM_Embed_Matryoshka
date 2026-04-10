@@ -17,7 +17,7 @@ torchrun \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
     --output_dir training/AdaptiveMRL_fastVLM_combine \
-    --per_device_train_batch_size 32 \
+    --per_device_train_batch_size 64 \
     --gradient_accumulation_steps 1 \
     --learning_rate 5e-5 \
     --num_train_epochs 2 \
@@ -25,7 +25,7 @@ torchrun \
     --logging_steps 1 \
     --save_strategy epoch \
     --seed 42 \
-    --lr_scheduler_type constant \
+    --lr_scheduler_type cosine \
     --weight_decay 0.01 \
     --warmup_ratio 0.03 \
     --optimizer_name adamw \
@@ -36,8 +36,8 @@ torchrun \
     --stage1_projection_spec "896->768,768->512,512->256,256->128,128->64" \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.8,128:0.8,256:1,512:1,768:1" \
-    --orthogonal_weight 0.02 \
-    --spectrum_kl_weight 0.3 \
+    --align_l1_weights "64:0.8,128:0.8,256:0.8,512:0.8,768:0.8" \
+    --orthogonal_weight 0.01 \
+    --spectrum_kl_weight 0.2 \
     --spectrum_kl_pair_weights "896->768:0.6,768->512:0.6,512->256:0.6,256->128:0.6,128->64:0.6" \
     #--orthogonal_pair_weights "896->768:0.01,768->512:0.01,512->256:0.01,256->128:0.01,128->64:0.01"
