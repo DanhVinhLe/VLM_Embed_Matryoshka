@@ -170,6 +170,22 @@ class TrainingArguments(TrainingArguments):
         default="",
         metadata={"help": "Optional per-adjacent-pair weights for spectrum KL. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
     )
+    spectrum_loss_type: str = field(
+        default="svd_kl",
+        metadata={"help": "Type of the second (spectral) consistency loss in Adaptive Matryoshka Stage-1. Options: 'svd_kl' (existing) or 'laplacian_kl'."},
+    )
+    laplacian_tau: float = field(
+        default=0.07,
+        metadata={"help": "Temperature for cosine-similarity adjacency in Laplacian spectral consistency loss."},
+    )
+    laplacian_k_eig: int = field(
+        default=10,
+        metadata={"help": "Number of smallest Laplacian eigenvalues to use for Laplacian spectral consistency loss."},
+    )
+    laplacian_top_k: int = field(
+        default=-1,
+        metadata={"help": "Optional Top-K sparsification for Laplacian adjacency. Set <=0 to disable and use dense adjacency."},
+    )
     router_alpha: float = field(
         default=0.01,
         metadata={"help": "Compute penalty weight for Adaptive Matryoshka Stage-2 router training."},
