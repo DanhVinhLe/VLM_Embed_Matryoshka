@@ -186,6 +186,10 @@ class TrainingArguments(TrainingArguments):
         default=-1,
         metadata={"help": "Optional Top-K sparsification for Laplacian adjacency. Set <=0 to disable and use dense adjacency."},
     )
+    laplacian_pair_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-adjacent-pair weights specifically for laplacian_kl. Format: '1024->512:1.0,512->256:0.7'. If empty, reuses spectrum_kl_pair_weights."},
+    )
     router_alpha: float = field(
         default=0.01,
         metadata={"help": "Compute penalty weight for Adaptive Matryoshka Stage-2 router training."},

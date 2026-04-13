@@ -42,6 +42,7 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         self.spectrum_kl_weight = float(getattr(args, "spectrum_kl_weight", 0.0))
         self.spectrum_kl_eps = float(getattr(args, "spectrum_kl_eps", 1e-8))
         self.spectrum_kl_pair_weights = self._parse_pair_weight_map(getattr(args, "spectrum_kl_pair_weights", ""))
+        self.laplacian_pair_weights = self._parse_pair_weight_map(getattr(args, "laplacian_pair_weights", ""))
         self.spectrum_loss_type = str(getattr(args, "spectrum_loss_type", "svd_kl")).strip().lower()
         self.laplacian_tau = float(getattr(args, "laplacian_tau", 0.07))
         self.laplacian_k_eig = int(getattr(args, "laplacian_k_eig", 10))
@@ -318,9 +319,12 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
                     reduction="batchmean",
                 )
             pair_losses.append(kl_loss)
+            pair_weight_map = self.spectrum_kl_pair_weights
+            if self.spectrum_loss_type == "laplacian_kl":
+                pair_weight_map = self.laplacian_pair_weights or self.spectrum_kl_pair_weights
             pair_weights.append(
                 self._resolve_pair_weight(
-                    self.spectrum_kl_pair_weights,
+                    pair_weight_map,
                     large_dim,
                     small_dim,
                     default=1.0,
