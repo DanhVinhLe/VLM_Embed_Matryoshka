@@ -36,13 +36,13 @@ torchrun \
     --stage1_projection_spec "896->768,768->512,512->256,256->128,128->64" \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.8,128:0.8,256:0.8,512:0.8,768:0.8" \
-    --orthogonal_weight 0.03 \
+    --align_l1_weights "64:0.75,128:0.75,256:0.75,512:0.75,768:0.75" \
+    --orthogonal_weight 0.005 \
     --spectrum_kl_weight 0.25 \
     --spectrum_loss_type laplacian_kl \
     --laplacian_tau 0.07 \
-    --laplacian_k_eig 10 \
+    --laplacian_k_eig 32 \
     --laplacian_top_k -1 \
     --spectrum_kl_pair_weights "896->768:0.6,768->512:0.6,512->256:0.6,256->128:0.6,128->64:0.6" \
-    --laplacian_pair_weights "896->768:0.8,768->512:0.8,512->256:0.7,256->128:0.7,128->64:0.6" \
+    --laplacian_pair_weights "896->768:1.0,768->512:1.0,512->256:1.0,256->128:1.0,128->64:1.0" \
     #--orthogonal_pair_weights "896->768:0.01,768->512:0.01,512->256:0.01,256->128:0.01,128->64:0.01"
