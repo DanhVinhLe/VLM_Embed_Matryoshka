@@ -16,8 +16,8 @@ torchrun \
     --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
-    --output_dir training/AdaptiveMRL_fastVLM_combine \
-    --per_device_train_batch_size 64 \
+    --output_dir training/AdaptiveMRL_fastVLM_combine_laplacian \
+    --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --learning_rate 5e-5 \
     --num_train_epochs 2 \
@@ -25,7 +25,7 @@ torchrun \
     --logging_steps 1 \
     --save_strategy epoch \
     --seed 42 \
-    --lr_scheduler_type cosine \
+    --lr_scheduler_type constant \
     --weight_decay 0.01 \
     --warmup_ratio 0.03 \
     --optimizer_name adamw \
@@ -37,8 +37,8 @@ torchrun \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
     --align_l1_weights "64:0.8,128:0.8,256:0.8,512:0.8,768:0.8" \
-    --orthogonal_weight 0.01 \
-    --spectrum_kl_weight 0.2 \
+    --orthogonal_weight 0.03 \
+    --spectrum_kl_weight 0.25 \
     --spectrum_loss_type laplacian_kl \
     --laplacian_tau 0.07 \
     --laplacian_k_eig 10 \
