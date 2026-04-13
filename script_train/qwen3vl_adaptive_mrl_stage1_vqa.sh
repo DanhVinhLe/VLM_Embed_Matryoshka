@@ -39,5 +39,10 @@ torchrun \
     --align_l1_weights "64:0.6,128:0.6,256:0.6,512:0.6,1024:0.6" \
     --orthogonal_weight 0.01 \
     --spectrum_kl_weight 0.05 \
+    --spectrum_loss_type laplacian_kl \
+    --laplacian_tau 0.07 \
+    --laplacian_k_eig 10 \
+    --laplacian_top_k -1 \
     --spectrum_kl_pair_weights "2048->1024:1.0,1024->512:1.0,512->256:0.8,256->128:0.8,128->64:0.6" \
+    --laplacian_pair_weights "2048->1024:1.0,1024->512:0.9,512->256:0.8,256->128:0.7,128->64:0.6" \
     
