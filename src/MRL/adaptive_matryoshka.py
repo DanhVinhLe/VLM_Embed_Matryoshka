@@ -42,6 +42,16 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         self.spectrum_kl_weight = float(getattr(args, "spectrum_kl_weight", 0.0))
         self.spectrum_kl_eps = float(getattr(args, "spectrum_kl_eps", 1e-8))
         self.spectrum_kl_pair_weights = self._parse_pair_weight_map(getattr(args, "spectrum_kl_pair_weights", ""))
+        self.laplacian_pair_weights = self._parse_pair_weight_map(getattr(args, "laplacian_pair_weights", ""))
+        self.spectrum_loss_type = str(getattr(args, "spectrum_loss_type", "svd_kl")).strip().lower()
+        self.laplacian_tau = float(getattr(args, "laplacian_tau", 0.07))
+        self.laplacian_k_eig = int(getattr(args, "laplacian_k_eig", 10))
+        laplacian_top_k = int(getattr(args, "laplacian_top_k", -1))
+        self.laplacian_top_k: Optional[int] = laplacian_top_k if laplacian_top_k > 0 else None
+        if self.spectrum_loss_type not in {"svd_kl", "laplacian_kl"}:
+            raise ValueError(
+                f"Unsupported spectrum_loss_type={self.spectrum_loss_type}. Use one of: svd_kl, laplacian_kl."
+            )
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -290,20 +300,31 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         for small_dim, large_dim in zip(asc_dims[:-1], asc_dims[1:]):
             small_rep = torch.cat([qry_full[:, :small_dim], pos_full[:, :small_dim]], dim=0)
             large_rep = torch.cat([qry_full[:, :large_dim], pos_full[:, :large_dim]], dim=0)
+            if self.spectrum_loss_type == "laplacian_kl":
+                kl_loss, _, _ = self.spectral_loss(
+                    z_small=small_rep,
+                    z_large=large_rep,
+                    tau=self.laplacian_tau,
+                    k_eig=self.laplacian_k_eig,
+                    top_k=self.laplacian_top_k,
+                )
+            else:
+                small_spec = self._spectral_distribution(small_rep)
+                large_spec = self._spectral_distribution(large_rep)[:small_dim]
+                large_spec = large_spec / large_spec.sum().clamp_min(self.spectrum_kl_eps)
 
-            small_spec = self._spectral_distribution(small_rep)
-            large_spec = self._spectral_distribution(large_rep)[:small_dim]
-            large_spec = large_spec / large_spec.sum().clamp_min(self.spectrum_kl_eps)
-
-            kl_loss = F.kl_div(
-                large_spec.clamp_min(self.spectrum_kl_eps).log(),
-                small_spec.clamp_min(self.spectrum_kl_eps),
-                reduction="batchmean",
-            )
+                kl_loss = F.kl_div(
+                    large_spec.clamp_min(self.spectrum_kl_eps).log(),
+                    small_spec.clamp_min(self.spectrum_kl_eps),
+                    reduction="batchmean",
+                )
             pair_losses.append(kl_loss)
+            pair_weight_map = self.spectrum_kl_pair_weights
+            if self.spectrum_loss_type == "laplacian_kl":
+                pair_weight_map = self.laplacian_pair_weights or self.spectrum_kl_pair_weights
             pair_weights.append(
                 self._resolve_pair_weight(
-                    self.spectrum_kl_pair_weights,
+                    pair_weight_map,
                     large_dim,
                     small_dim,
                     default=1.0,
@@ -314,6 +335,56 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         weight_tensor = torch.tensor(pair_weights, device=loss_stack.device, dtype=loss_stack.dtype)
         weighted_loss = (loss_stack * weight_tensor).sum() / weight_tensor.sum().clamp_min(self.spectrum_kl_eps)
         return weighted_loss
+
+    def compute_laplacian(self, z: Tensor, tau: float, top_k: Optional[int] = None) -> Tensor:
+        z = F.normalize(z, p=2, dim=-1, eps=self.spectrum_kl_eps)
+        sim = z @ z.t()
+        adj = torch.exp(sim / max(tau, self.spectrum_kl_eps))
+
+        if top_k is not None:
+            top_k = max(1, min(int(top_k), adj.size(-1)))
+            keep_idx = torch.topk(adj, k=top_k, dim=-1, largest=True, sorted=False).indices
+            keep_mask = torch.zeros_like(adj, dtype=torch.bool)
+            keep_mask.scatter_(dim=-1, index=keep_idx, value=True)
+            keep_mask = keep_mask | keep_mask.t()
+            adj = adj * keep_mask.to(adj.dtype)
+
+        degree = adj.sum(dim=-1)
+        degree_inv_sqrt = torch.rsqrt(degree + self.spectrum_kl_eps)
+        laplacian = torch.eye(adj.size(0), device=adj.device, dtype=adj.dtype)
+        laplacian = laplacian - (degree_inv_sqrt[:, None] * adj * degree_inv_sqrt[None, :])
+        return laplacian
+
+    def compute_spectrum(self, laplacian: Tensor, k_eig: int) -> Tensor:
+        eig_input = laplacian.float() if laplacian.dtype in (torch.bfloat16, torch.float16) else laplacian
+        eigvals = torch.linalg.eigh(eig_input).eigenvalues
+        eigvals = eigvals.clamp_min(self.spectrum_kl_eps)
+        k_eff = max(1, min(int(k_eig), eigvals.numel()))
+        low_freq = eigvals[:k_eff]
+        p = low_freq / (low_freq.sum() + self.spectrum_kl_eps)
+        return p.clamp_min(self.spectrum_kl_eps)
+
+    def spectral_loss(
+        self,
+        z_small: Tensor,
+        z_large: Tensor,
+        tau: float,
+        k_eig: int,
+        top_k: Optional[int],
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        lap_small = self.compute_laplacian(z=z_small, tau=tau, top_k=top_k)
+        lap_large = self.compute_laplacian(z=z_large, tau=tau, top_k=top_k)
+
+        p_small = self.compute_spectrum(lap_small, k_eig=k_eig)
+        p_large = self.compute_spectrum(lap_large, k_eig=k_eig).detach()
+
+        p_small = p_small / (p_small.sum() + self.spectrum_kl_eps)
+        p_large = p_large / (p_large.sum() + self.spectrum_kl_eps)
+
+        kl_small_to_large = torch.sum(p_small * torch.log((p_small + self.spectrum_kl_eps) / (p_large + self.spectrum_kl_eps)))
+        kl_large_to_small = torch.sum(p_large * torch.log((p_large + self.spectrum_kl_eps) / (p_small + self.spectrum_kl_eps)))
+        loss = kl_small_to_large + kl_large_to_small
+        return loss, p_small, p_large
 
     def forward(self, model_trainer, input_data: Dict[str, Dict[str, Tensor]]) -> Dict[str, Tensor]:
         model = model_trainer.model

@@ -33,11 +33,16 @@ torchrun \
     --kd_loss_type adaptive_mrl_stage1 \
     --nested_dims 64 128 256 512 1024 2048 \
     --stage1_phase all \
-    --stage1_projection_spec "2048->1024,1024->512,512->256,256->128,128->64" \
+    --stage1_projection_spec "2048->1024,1024->768,768->512,512->256,256->128,128->64" \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.6,128:0.6,256:0.6,512:0.6,1024:0.6" \
-    --orthogonal_weight 0.01 \
-    --spectrum_kl_weight 0.05 \
+    --align_l1_weights "64:0.8,128:0.8,256:0.8,512:0.8,768:0.8,1024:0.8" \
+    --orthogonal_weight 0.03 \
+    --spectrum_kl_weight 0.25 \
+    --spectrum_loss_type laplacian_kl \
+    --laplacian_tau 0.07 \
+    --laplacian_k_eig 10 \
+    --laplacian_top_k -1 \
     --spectrum_kl_pair_weights "2048->1024:1.0,1024->512:1.0,512->256:0.8,256->128:0.8,128->64:0.6" \
+    --laplacian_pair_weights "2048->1024:1.0,1024->512:0.9,768->512:0.8,512->256:0.8,256->128:0.7,128->64:0.6" \
     
