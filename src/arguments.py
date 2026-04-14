@@ -158,6 +158,10 @@ class TrainingArguments(TrainingArguments):
         default="",
         metadata={"help": "Optional per-projection orthogonality weights. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
     )
+    projection_orthogonal_map: str = field(
+        default="",
+        metadata={"help": "Optional orthogonal parametrization for projection matrices. Set 'cayley' to enforce orthogonality via torch.nn.utils.parametrizations.orthogonal; this disables explicit orthogonal_weight regularization."},
+    )
     spectrum_kl_weight: float = field(
         default=0.0,
         metadata={"help": "Global weight for adjacent-dimension SVD spectrum KL regularization in Adaptive Matryoshka Stage-1."},
@@ -169,6 +173,26 @@ class TrainingArguments(TrainingArguments):
     spectrum_kl_pair_weights: str = field(
         default="",
         metadata={"help": "Optional per-adjacent-pair weights for spectrum KL. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
+    )
+    spectrum_loss_type: str = field(
+        default="svd_kl",
+        metadata={"help": "Type of the second (spectral) consistency loss in Adaptive Matryoshka Stage-1. Options: 'svd_kl' (existing) or 'laplacian_kl'."},
+    )
+    laplacian_tau: float = field(
+        default=0.07,
+        metadata={"help": "Temperature for cosine-similarity adjacency in Laplacian spectral consistency loss."},
+    )
+    laplacian_k_eig: int = field(
+        default=10,
+        metadata={"help": "Number of smallest Laplacian eigenvalues to use for Laplacian spectral consistency loss."},
+    )
+    laplacian_top_k: int = field(
+        default=-1,
+        metadata={"help": "Optional Top-K sparsification for Laplacian adjacency. Set <=0 to disable and use dense adjacency."},
+    )
+    laplacian_pair_weights: str = field(
+        default="",
+        metadata={"help": "Optional per-adjacent-pair weights specifically for laplacian_kl. Format: '1024->512:1.0,512->256:0.7'. If empty, reuses spectrum_kl_pair_weights."},
     )
     router_alpha: float = field(
         default=0.01,
