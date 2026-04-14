@@ -158,6 +158,10 @@ class TrainingArguments(TrainingArguments):
         default="",
         metadata={"help": "Optional per-projection orthogonality weights. Format: '1024->512:1.0,512->256:0.7' (or '1024:512:1.0')."},
     )
+    projection_orthogonal_map: str = field(
+        default="",
+        metadata={"help": "Optional orthogonal parametrization for projection matrices. Set 'cayley' to enforce orthogonality via torch.nn.utils.parametrizations.orthogonal; this disables explicit orthogonal_weight regularization."},
+    )
     spectrum_kl_weight: float = field(
         default=0.0,
         metadata={"help": "Global weight for adjacent-dimension SVD spectrum KL regularization in Adaptive Matryoshka Stage-1."},

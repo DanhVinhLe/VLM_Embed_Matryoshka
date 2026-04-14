@@ -150,7 +150,10 @@ class OneModelTrainer(nn.Module):
                         dimension_pairs.append((int(src_dim), int(dst_dim)))
         dimension_pairs = list(dict.fromkeys(dimension_pairs))
 
-        self.model.matryoshka_proj_bank = PairwiseProjectionBank(dimension_pairs).to(self.device)
+        self.model.matryoshka_proj_bank = PairwiseProjectionBank(
+            dimension_pairs,
+            orthogonal_projection_map=getattr(self.training_args, "projection_orthogonal_map", ""),
+        ).to(self.device)
         print_rank(
             f"Attached matryoshka projection bank with {len(dimension_pairs)} matrices over dims {valid_dims}"
         )

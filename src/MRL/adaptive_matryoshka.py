@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import parametrizations
 from torch import Tensor
 
 
@@ -471,14 +472,20 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
             )
 
             if hasattr(model, "matryoshka_proj_bank"):
-                base_orth = model.matryoshka_proj_bank.orthogonality_loss(src_dim=teacher_dim, dst_dim=student_dim)
-                orth_pair_weight = self._resolve_pair_weight(
-                    self.orthogonal_pair_weights,
-                    teacher_dim,
-                    student_dim,
-                    default=1.0,
-                )
-                orth_loss = orth_pair_weight * base_orth
+                if getattr(model.matryoshka_proj_bank, "use_orthogonal_parametrization", False):
+                    # With torch.nn.utils.parametrizations.orthogonal(..., orthogonal_map='cayley'),
+                    # the projection is constrained directly, so no extra orthogonal regularizer is applied.
+                    orth_pair_weight = 0.0
+                    orth_loss = torch.zeros_like(weighted_align_loss)
+                else:
+                    base_orth = model.matryoshka_proj_bank.orthogonality_loss(src_dim=teacher_dim, dst_dim=student_dim)
+                    orth_pair_weight = self._resolve_pair_weight(
+                        self.orthogonal_pair_weights,
+                        teacher_dim,
+                        student_dim,
+                        default=1.0,
+                    )
+                    orth_loss = orth_pair_weight * base_orth
             else:
                 orth_pair_weight = 1.0
                 orth_loss = torch.zeros_like(weighted_align_loss)
@@ -519,12 +526,31 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
 class PairwiseProjectionBank(nn.Module):
     """Trainable projection matrices P for mapping src_dim -> dst_dim with orthogonality regularization."""
 
-    def __init__(self, dimension_pairs: List[Tuple[int, int]]):
+    def __init__(self, dimension_pairs: List[Tuple[int, int]], orthogonal_projection_map: str = ""):
         super().__init__()
+        self.orthogonal_projection_map = str(orthogonal_projection_map or "").strip().lower()
+        self.use_orthogonal_parametrization = self.orthogonal_projection_map in {"cayley"}
+        if self.orthogonal_projection_map and not self.use_orthogonal_parametrization:
+            raise ValueError(
+                f"Unsupported orthogonal_projection_map={self.orthogonal_projection_map}. "
+                "Supported options: '', 'cayley'."
+            )
+
         self.projections = nn.ParameterDict()
+        self.projection_layers = nn.ModuleDict()
         for src_dim, dst_dim in dimension_pairs:
             key = self._key(src_dim, dst_dim)
-            self.projections[key] = nn.Parameter(self._init_projection(src_dim, dst_dim))
+            if self.use_orthogonal_parametrization:
+                layer = nn.Linear(src_dim, dst_dim, bias=False)
+                with torch.no_grad():
+                    layer.weight.copy_(self._init_projection(src_dim, dst_dim).transpose(0, 1))
+                self.projection_layers[key] = parametrizations.orthogonal(
+                    layer,
+                    name="weight",
+                    orthogonal_map=self.orthogonal_projection_map,
+                )
+            else:
+                self.projections[key] = nn.Parameter(self._init_projection(src_dim, dst_dim))
 
     @staticmethod
     def _key(src_dim: int, dst_dim: int) -> str:
@@ -542,11 +568,18 @@ class PairwiseProjectionBank(nn.Module):
         if src_dim == dst_dim:
             return x[:, :dst_dim]
         key = self._key(src_dim, dst_dim)
+        if self.use_orthogonal_parametrization:
+            if key not in self.projection_layers:
+                raise KeyError(f"Missing projection matrix for {src_dim}->{dst_dim}.")
+            return self.projection_layers[key](x)
+
         if key not in self.projections:
             raise KeyError(f"Missing projection matrix for {src_dim}->{dst_dim}.")
         return x @ self.projections[key]
 
     def orthogonality_loss(self, src_dim: int, dst_dim: int) -> Tensor:
+        if self.use_orthogonal_parametrization:
+            return torch.zeros((), device=next(self.parameters()).device)
         if src_dim == dst_dim:
             return torch.zeros((), device=next(self.parameters()).device)
         key = self._key(src_dim, dst_dim)
