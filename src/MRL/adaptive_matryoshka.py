@@ -511,6 +511,10 @@ class AdaptiveMatryoshkaStage1Loss(nn.Module):
         spectrum_kl_loss = self._adjacent_spectrum_kl_loss(qry_full, pos_full, valid_dims)
 
         final_loss = final_loss + self.spectrum_kl_weight * spectrum_kl_loss
+        if hasattr(model, "matryoshka_proj_bank"):
+            # Touch all projection parameters with zero weight so DDP sees every parameter
+            # in the autograd graph even when curriculum phase uses only a subset of pairs.
+            final_loss = final_loss + model.matryoshka_proj_bank.zero_weight_ddp_param_touch()
 
         # Keep `contrastive_loss` for compatibility with existing trainer logging.
         metrics["loss"] = final_loss
@@ -529,12 +533,16 @@ class PairwiseProjectionBank(nn.Module):
     def __init__(self, dimension_pairs: List[Tuple[int, int]], orthogonal_projection_map: str = ""):
         super().__init__()
         self.orthogonal_projection_map = str(orthogonal_projection_map or "").strip().lower()
-        self.use_orthogonal_parametrization = self.orthogonal_projection_map in {"cayley"}
+        self.use_orthogonal_parametrization = self.orthogonal_projection_map in {"cayley", "matrix_exp", "cayley_safe"}
         if self.orthogonal_projection_map and not self.use_orthogonal_parametrization:
             raise ValueError(
                 f"Unsupported orthogonal_projection_map={self.orthogonal_projection_map}. "
-                "Supported options: '', 'cayley'."
+                "Supported options: '', 'cayley', 'matrix_exp', 'cayley_safe'."
             )
+        # Use `cayley_safe` to route to matrix_exp for maximal BF16/CUDA stability.
+        self.effective_orthogonal_projection_map = (
+            "matrix_exp" if self.orthogonal_projection_map == "cayley_safe" else self.orthogonal_projection_map
+        )
 
         self.projections = nn.ParameterDict()
         self.projection_layers = nn.ModuleDict()
@@ -547,10 +555,19 @@ class PairwiseProjectionBank(nn.Module):
                 self.projection_layers[key] = parametrizations.orthogonal(
                     layer,
                     name="weight",
-                    orthogonal_map=self.orthogonal_projection_map,
+                    orthogonal_map=self.effective_orthogonal_projection_map,
                 )
             else:
                 self.projections[key] = nn.Parameter(self._init_projection(src_dim, dst_dim))
+
+    def _apply(self, fn):
+        super()._apply(fn)
+        if self.use_orthogonal_parametrization and self.effective_orthogonal_projection_map == "cayley":
+            # Keep true-cayley parametrized layers in FP32 so internal torch.linalg.solve
+            # does not run in BF16 on CUDA after global model dtype casts.
+            for layer in self.projection_layers.values():
+                layer.float()
+        return self
 
     @staticmethod
     def _key(src_dim: int, dst_dim: int) -> str:
@@ -571,7 +588,15 @@ class PairwiseProjectionBank(nn.Module):
         if self.use_orthogonal_parametrization:
             if key not in self.projection_layers:
                 raise KeyError(f"Missing projection matrix for {src_dim}->{dst_dim}.")
-            return self.projection_layers[key](x)
+            layer = self.projection_layers[key]
+            if self.effective_orthogonal_projection_map == "cayley":
+                out_dtype = x.dtype
+                # Run true-cayley projection in FP32 with autocast disabled, then cast back.
+                # This preserves true cayley behavior while avoiding BF16 CUDA solver failures.
+                with torch.autocast(device_type=x.device.type, enabled=False):
+                    projected = layer(x.float())
+                return projected.to(dtype=out_dtype)
+            return layer(x)
 
         if key not in self.projections:
             raise KeyError(f"Missing projection matrix for {src_dim}->{dst_dim}.")
@@ -589,6 +614,28 @@ class PairwiseProjectionBank(nn.Module):
         gram = p.transpose(0, 1) @ p
         eye = torch.eye(dst_dim, device=p.device, dtype=p.dtype)
         return ((gram - eye) ** 2).mean()
+
+    def zero_weight_ddp_param_touch(self) -> Tensor:
+        touched: Optional[Tensor] = None
+        if self.use_orthogonal_parametrization:
+            for layer in self.projection_layers.values():
+                for param in layer.parameters():
+                    if not param.requires_grad:
+                        continue
+                    term = param.sum() * 0.0
+                    touched = term if touched is None else touched + term
+        else:
+            for param in self.projections.values():
+                if not param.requires_grad:
+                    continue
+                term = param.sum() * 0.0
+                touched = term if touched is None else touched + term
+
+        if touched is None:
+            # Fallback tensor if projection bank is unexpectedly empty.
+            device = next(self.parameters()).device
+            return torch.zeros((), device=device)
+        return touched
 
 
 class AdaptiveDimensionRouter(nn.Module):

@@ -160,7 +160,7 @@ class TrainingArguments(TrainingArguments):
     )
     projection_orthogonal_map: str = field(
         default="",
-        metadata={"help": "Optional orthogonal parametrization for projection matrices. Set 'cayley' to enforce orthogonality via torch.nn.utils.parametrizations.orthogonal; this disables explicit orthogonal_weight regularization."},
+        metadata={"help": "Optional orthogonal parametrization for projection matrices. Options: '', 'matrix_exp', 'cayley', 'cayley_safe'. Use 'cayley' for true Cayley map (executed in FP32 under mixed precision), or 'cayley_safe' to route to 'matrix_exp'. This disables explicit orthogonal_weight regularization."},
     )
     spectrum_kl_weight: float = field(
         default=0.0,
