@@ -572,10 +572,17 @@ class PairwiseProjectionBank(nn.Module):
             if key not in self.projection_layers:
                 raise KeyError(f"Missing projection matrix for {src_dim}->{dst_dim}.")
             layer = self.projection_layers[key]
-            if self.orthogonal_projection_map == "cayley" and x.dtype == torch.bfloat16:
+            if self.orthogonal_projection_map == "cayley":
                 # torch.nn.utils.parametrizations.orthogonal(..., orthogonal_map="cayley")
                 # internally uses LU factorization which is not implemented for BF16 on CUDA.
-                # Run the projection in FP32 and cast back to preserve mixed-precision training.
+                # Ensure the parametrized layer remains in FP32 and run projection in FP32.
+                # This avoids BF16 LU factorization in parametrizations.py (torch.linalg.solve).
+                layer_param_dtype = next(layer.parameters()).dtype
+                needs_bf16_workaround = x.dtype == torch.bfloat16 or layer_param_dtype == torch.bfloat16
+                if not needs_bf16_workaround:
+                    return layer(x)
+                if layer_param_dtype == torch.bfloat16:
+                    layer.float()
                 with torch.autocast(device_type=x.device.type, enabled=False):
                     projected = layer(x.float())
                 return projected.to(dtype=x.dtype)
