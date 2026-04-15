@@ -92,6 +92,30 @@ Likewise, if an edge is not listed in `--orthogonal_pair_weights`, that edge use
 
 Orthogonality regularization is still applied per active projection edge.
 
+
+### FastVLM adaptive recommended presets (same batch size and epochs)
+
+If you want better stability/performance while **keeping the same batch size and epoch count** as the current FastVLM adaptive scripts, use:
+
+```bash
+bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
+bash script_train/fastvlm_adaptive_router_stage2_vqa_best.sh
+```
+
+These presets keep:
+- Stage-1: `per_device_train_batch_size=32`, `num_train_epochs=2`
+- Stage-2: `per_device_train_batch_size=64`, `num_train_epochs=2`
+
+while tuning learning-rate schedule and adaptive-loss/router hyperparameters for stronger retrieval quality.
+
+To use a projection map **different from Cayley** in Stage-1, set `ORTHO_MAP` when launching:
+
+```bash
+ORTHO_MAP=matrix_exp bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
+```
+
+Supported values are `matrix_exp`, `cayley`, `cayley_safe`, or empty (`""`) to disable map-based reparameterization.
+
 ## Inference & Evaluation
 1. To evaluate our model on an MMEB dataset (e.g., MSCOCO_i2t), run:
 ```bash 
