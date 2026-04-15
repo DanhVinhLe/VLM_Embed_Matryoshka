@@ -116,6 +116,16 @@ ORTHO_MAP=matrix_exp bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
 
 Supported values are `matrix_exp`, `cayley`, `cayley_safe`, or empty (`""`) to disable map-based reparameterization.
 
+To reproduce the **previous non-Cayley orthogonal-loss behavior** (the one that uses orthogonal loss), run:
+
+```bash
+USE_PREVIOUS_ORTHO_LOSS=1 bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
+```
+
+This compatibility mode applies `ORTHO_MAP=""` and `ORTHO_WEIGHT=0.01`, i.e. no map-based reparameterization and explicit orthogonal-loss regularization.
+
+(`USE_PREVIOUS_ORTHO=1` is kept as a backward-compat alias.)
+
 ## Inference & Evaluation
 1. To evaluate our model on an MMEB dataset (e.g., MSCOCO_i2t), run:
 ```bash 

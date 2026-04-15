@@ -9,6 +9,21 @@
 #   ORTHO_MAP=""          -> disable re-parameterization (use explicit orthogonal_weight regularizer only)
 
 ORTHO_MAP=${ORTHO_MAP:-matrix_exp}
+ORTHO_WEIGHT=${ORTHO_WEIGHT:-0.005}
+
+# Compatibility mode for the previous non-Cayley orthogonal-loss setup.
+# Usage: USE_PREVIOUS_ORTHO_LOSS=1 bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
+# This maps to: projection_orthogonal_map="" and orthogonal_weight=0.01
+if [[ "${USE_PREVIOUS_ORTHO_LOSS:-0}" == "1" ]]; then
+  ORTHO_MAP=""
+  ORTHO_WEIGHT=0.01
+fi
+
+# Backward-compat alias (deprecated): USE_PREVIOUS_ORTHO=1 behaves the same as USE_PREVIOUS_ORTHO_LOSS=1.
+if [[ "${USE_PREVIOUS_ORTHO:-0}" == "1" ]]; then
+  ORTHO_MAP=""
+  ORTHO_WEIGHT=0.01
+fi
 
 torchrun \
     --standalone \
@@ -52,7 +67,7 @@ torchrun \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
     --align_l1_weights "64:0.6,128:0.8,256:1.0,512:1.0,768:0.9" \
-    --orthogonal_weight 0.005 \
+    --orthogonal_weight "${ORTHO_WEIGHT}" \
     --projection_orthogonal_map "${ORTHO_MAP}" \
     --spectrum_kl_weight 0.35 \
     --spectrum_loss_type laplacian_kl \
