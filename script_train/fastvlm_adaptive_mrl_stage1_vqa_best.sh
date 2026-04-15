@@ -8,8 +8,8 @@
 #   ORTHO_MAP=cayley_safe -> internally routes to matrix_exp
 #   ORTHO_MAP=""          -> disable re-parameterization (use explicit orthogonal_weight regularizer only)
 
-ORTHO_MAP=${ORTHO_MAP:-matrix_exp}
-ORTHO_WEIGHT=${ORTHO_WEIGHT:-0.005}
+ORTHO_MAP=""
+ORTHO_WEIGHT=0.001
 
 # Compatibility mode for the previous non-Cayley orthogonal-loss setup.
 # Usage: USE_PREVIOUS_ORTHO_LOSS=1 bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
