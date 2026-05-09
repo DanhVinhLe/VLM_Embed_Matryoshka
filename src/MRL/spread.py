@@ -252,7 +252,7 @@ class SpreadLoss(nn.Module):
                 continue
             
             # 1. Chốt số chiều an toàn (actual_dim)
-            actual_dim = min(N, full_dim, dim)
+            actual_dim = min(N, dim)
             
             cnt += 1
             
