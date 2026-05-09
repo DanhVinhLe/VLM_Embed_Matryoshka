@@ -9,9 +9,9 @@ from src.model.utils import unnorm_pooling
 from .utils import count_clean_text_tokens, get_unpadded_hidden
 
 
-class EOFDLoss(nn.Module):
+class SpreadLoss(nn.Module):
     def __init__(self, args):
-        super(EOFDLoss, self).__init__()
+        super(SpreadLoss, self).__init__()
         self.args = args
         self.cross_entropy = nn.CrossEntropyLoss()
         self.nested_dims = getattr(args, 'nested_dims', [64, 128, 256, 512, 1024])
@@ -24,6 +24,8 @@ class EOFDLoss(nn.Module):
             self.world_size = 1
             self.process_rank = 0
         self.lambda_ortho = 1e-3
+
+        self.nested_dims = sorted(self.nested_dims)
             
     def _dist_gather_tensor(self, t: Tensor):
         t = t.contiguous()
@@ -33,33 +35,7 @@ class EOFDLoss(nn.Module):
         all_tensors = torch.cat(all_tensors, dim=0)
         return all_tensors
     
-    def get_orthogonal_loss(self, projectors):
-        ortho_loss = 0.0
-        num_linear_layers = 0
-        
-        for proj_name, projector_seq in projectors.items():
-            for module in projector_seq.modules():
-                if isinstance(module, nn.Linear):
-                    W = module.weight
-                    out_dim, in_dim = W.shape
-                    
-                    if out_dim <= in_dim:
-                        w_w_t = torch.matmul(W, W.t())
-                        identity = torch.eye(out_dim, device=W.device, dtype=W.dtype)
-                        # Dùng MSE để lấy trung bình trên từng phần tử ma trận
-                        ortho_loss += F.mse_loss(w_w_t, identity)
-                    else:
-                        w_t_w = torch.matmul(W.t(), W)
-                        identity = torch.eye(in_dim, device=W.device, dtype=W.dtype)
-                        ortho_loss += F.mse_loss(w_t_w, identity)
-                    
-                    num_linear_layers += 1
-                    
-        # Lấy trung bình trên tổng số lớp Linear
-        if num_linear_layers > 0:
-            ortho_loss = ortho_loss / num_linear_layers
-            
-        return ortho_loss
+    
 
     def create_semi_orthogonal_matrix(self, tensor):
         orig_dtype = tensor.dtype  # lưu dtype ban đầu (fp16)
@@ -76,6 +52,70 @@ class EOFDLoss(nn.Module):
 
         w = w.to(orig_dtype)  # cast về lại fp16
         return w
+    
+    @torch.no_grad()
+    def power_iteration_pca(
+        self,
+        X,
+        r=256,
+        power_iters=2,
+        ns_iters=5,
+        eps=1e-6,
+    ):
+        """
+        PCA/subspace estimation bằng power iteration + Newton-Schulz.
+
+        Args:
+            X: [N, D] token/features đã flatten và remove padding.
+            r: số principal directions.
+            power_iters: số lần subspace iteration.
+            ns_iters: số bước Newton-Schulz.
+            eps: stability.
+
+        Returns:
+            Q: [D, r] orthonormal principal subspace basis.
+        """
+        N, D = X.shape
+
+        # # Bước 0 (Khuyến nghị cho PCA thực sự): Trung bình hóa dữ liệu nếu X chưa được center
+        # X = X - X.mean(dim=0, keepdim=True)
+
+        # random init
+        Q = torch.randn(D, r, device=X.device, dtype=X.dtype)
+        Q = Q / (Q.norm(dim=0, keepdim=True) + eps)
+
+        I = torch.eye(r, device=X.device, dtype=X.dtype)
+
+        for _ in range(power_iters):
+            # power iteration: Q <- X^T X Q
+            Q = X.T @ (X @ Q)
+
+            # ---------- orthogonalization ----------
+            G = Q.T @ Q
+
+            # Lưu lại norm để scale ngược lại sau Newton-Schulz
+            g_norm = G.norm() + eps
+            
+            # stability normalization để đảm bảo hội tụ
+            G_scaled = G / g_norm
+
+            # Newton-Schulz inverse sqrt
+            Y = G_scaled
+            Z = I.clone()
+
+            for _ in range(ns_iters):
+                T = 0.5 * (3.0 * I - Z @ Y)
+                Y = Y @ T
+                Z = T @ Z
+
+            # Bù lại hệ số scale đã chia ở trên: Z_true = Z / sqrt(g_norm)
+            Z = Z / torch.sqrt(g_norm)
+
+            # orthogonalize
+            Q = Q @ Z
+
+        return Q
+
 
     def forward(self, model_trainer, input_data):
         self.model_trainer = model_trainer
@@ -200,102 +240,61 @@ class EOFDLoss(nn.Module):
         valid_qry_tokens = torch.cat(valid_qry_tokens, dim=0)  # [num_valid_tokens, hidden_dim]
         valid_pos_tokens = torch.cat(valid_pos_tokens, dim=0)  # [num_valid_tokens, hidden_dim]
 
-        std_qry = valid_qry_tokens.std(dim=0, unbiased=False) # [hidden_dim]
-        std_pos = valid_pos_tokens.std(dim=0, unbiased=False)
-
-        # 1. Xác định hằng số power (p) theo bài báo (họ thường dùng 0.5 hoặc 1.0)
-        power = 0.5
-
-        # 2. Tính giá trị trung bình của các std
-        mean_std_qry = std_qry.mean()
-        mean_std_pos = std_pos.mean()
-
-        # 3. Chuẩn hóa (chia std của từng chiều cho giá trị trung bình)
-        eps = 1e-8
-        std_scaled_qry = std_qry / (mean_std_qry + eps)
-        std_scaled_pos = std_pos / (mean_std_pos + eps)
-
-        # 4. Nâng lên lũy thừa p để tạo trọng số tập trung (EOFD weights)
-        weight_qry = std_scaled_qry ** power
-        weight_pos = std_scaled_pos ** power   
-
-        weight_qry = weight_qry.unsqueeze(0)  # [1, hidden_dim]
-        weight_pos = weight_pos.unsqueeze(0)  # [1, hidden_dim]   
-
-        # valid_q_norm = F.normalize(valid_qry_tokens.float(), p=2, dim=1)
-        # valid_p_norm = F.normalize(valid_pos_tokens.float(), p=2, dim=1)
-
-        # valid_q_norm_detach = valid_q_norm.detach()
-        # valid_p_norm_detach = valid_p_norm.detach()
-
-        valid_q_detach = valid_qry_tokens.detach()
-        valid_p_detach = valid_pos_tokens.detach()
+        valid_full_tokens = torch.cat([valid_qry_tokens, valid_pos_tokens], dim=0)
 
         cnt = 0
         kd_loss = 0.0
+
+        N, full_dim = valid_full_tokens.shape
+
         for i, dim in enumerate(nested_dims):
             if dim >= full_dim:
                 continue
+            
+            # 1. Chốt số chiều an toàn (actual_dim)
+            actual_dim = min(N, full_dim, dim)
+            
             cnt += 1
-            adjacent_dim = nested_dims[i+1] if i < len(nested_dims) - 1 else dim
-            q = projectors[f'{dim}_{adjacent_dim}'](valid_qry_tokens[:, :dim])
-            p = projectors[f'{dim}_{adjacent_dim}'](valid_pos_tokens[:, :dim])
+            
+            # ==========================================
+            # LUỒNG 1: TẠO TEACHER TỪ FULL TOKENS
+            # ==========================================
+            Q_teacher = self.power_iteration_pca(valid_full_tokens, actual_dim)
+            
+            teacher_projected = valid_full_tokens @ Q_teacher
 
-            # q_norm = F.normalize(q, p=2, dim=1)
-            # p_norm = F.normalize(p, p=2, dim=1)
+            # ==========================================
+            # LUỒNG 2: TẠO STUDENT TỪ SLICED TOKENS
+            # ==========================================
+            # Cắt lấy không gian dim chiều
+            student_sliced = valid_full_tokens[:, :dim]  # [N, dim]
+            
+            # DÙNG PCA CHIẾU SLICED TOKENS VỀ ACTUAL_DIM
+            Q_student = self.power_iteration_pca(student_sliced, actual_dim)
 
-            # qry_diff = weight_qry[:, :adjacent_dim] * (valid_q_detach[:, :adjacent_dim]  - q).abs()
-            # pos_diff = weight_pos[:, :adjacent_dim] * (valid_p_detach[:, :adjacent_dim]  - p).abs()
-            qry_diff = (valid_q_detach[:, :adjacent_dim]  - q).abs()
-            pos_diff = (valid_p_detach[:, :adjacent_dim]  - p).abs()
-            weighted_squared_diff = (qry_diff.mean() + pos_diff.mean()) * 0.5  # [num_valid_tokens, hidden_dim]
-            kd_loss += weighted_squared_diff
+            # Chiếu Sliced Tokens xuống actual_dim -> [N, actual_dim]
+            student_projected = student_sliced @ Q_student
+
+            # ==========================================
+            # LUỒNG 3: CHUẨN HÓA VÀ TÍNH LOSS
+            # ==========================================
+            teacher_norm = F.normalize(teacher_projected, p=2, dim=-1)
+            student_norm = F.normalize(student_projected, p=2, dim=-1)
+
+            # Ép Student PCA Subspace học theo Teacher PCA Subspace
+            loss_dim = F.mse_loss(student_norm, teacher_norm.detach())
+            
+            kd_loss += loss_dim
 
         if cnt > 0:
             kd_loss = kd_loss / cnt
-
-        # orthogonal_loss = self.get_orthogonal_loss(projectors)  # Tính loss orthogonal và có thể thêm vào kd_loss nếu muốn
-
-        # contrastive loss 2
-        contrastive_loss_2 = 0.0
-        num_dims_2 = 0
-
-        unnorm_qry_reps = unnorm_pooling(model, student_qry_hidden_states[-1], student_input_qry['attention_mask'])
-        unnorm_pos_reps = unnorm_pooling(model, student_pos_hidden_states[-1], student_input_pos['attention_mask'])
-
-        qry_reps_detach = student_qry_reps.detach()
-        pos_reps_detach = student_pos_reps.detach()
         
-        for i, dim in enumerate(nested_dims):
-            if dim >= full_dim:
-                continue
-            adjacent_dim = nested_dims[i+1] if i < len(nested_dims) - 1 else dim
-            q = projectors[f'{dim}_{adjacent_dim}'](unnorm_qry_reps[:, :dim])
-            p = projectors[f'{dim}_{adjacent_dim}'](unnorm_pos_reps[:, :dim])
-
-            q = F.normalize(q, p=2, dim=1)
-            p = F.normalize(p, p=2, dim=1)
-
-            scores1 = model.compute_similarity(q, pos_reps_detach[:, :adjacent_dim]).view(q.size(0), -1)
-            scores2 = model.compute_similarity(p, qry_reps_detach[:, :adjacent_dim]).view(p.size(0), -1)
-
-            loss = self.cross_entropy(scores1 / self.model_trainer.temperature, target) + self.cross_entropy(scores2 / self.model_trainer.temperature, target)
-            contrastive_loss_2 += loss / 2
-            num_dims_2 += 1
-
-        if self.average_loss and num_dims_2 > 0:
-            contrastive_loss_2 = contrastive_loss_2 / num_dims_2
-
-        # total_loss = contrastive_loss + self.kd_weight * kd_loss + self.lambda_ortho * orthogonal_loss + contrastive_loss_2
-        total_loss = contrastive_loss + self.kd_weight * kd_loss + contrastive_loss_2
-
+        total_loss = contrastive_loss + self.kd_weight * kd_loss
         result = {
             "loss": total_loss,
             "contrastive_loss": contrastive_loss,
             "kd_loss": kd_loss,
-            # "orthogonal_loss": orthogonal_loss,
-            "contrastive_loss_2": contrastive_loss_2
         }
-        result.update(dim_losses)
 
+        result.update(dim_losses)
         return result

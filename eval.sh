@@ -1,8 +1,8 @@
 python eval_mmeb.py \
-    --model_name HuggingFaceTB/SmolVLM-256M-Instruct \
-    --encode_output_path ./MMEB-evaloutputs/SmolVLM/ \
+    --model_name training/MSE_fastVLM_cls_b8_project_adjacent_cross_contrastive2_unnorm_orthogonal_maxdim_detach/checkpoint-epoch-0 \
+    --encode_output_path MMEB-evaloutputs/MSE_fastVLM_cls_b8_project_adjacent_cross_contrastive2_unnorm_orthogonal_maxdim_detach \
     --pooling eos \
-    --model_backbone idefics3 \
+    --model_backbone llava_qwen2 \
     --normalize True \
     --bf16 \
     --dataset_name TIGER-Lab/MMEB-eval \
@@ -10,6 +10,6 @@ python eval_mmeb.py \
     --dataset_split test \
     --per_device_eval_batch_size 16 \
     --image_resolution mid \
-    --image_dir /workspace/ComfyUI/models/gligen/VLM_Embed/eval_images \
+    --image_dir eval_images \
     --tgt_prefix_mod \
-    --nested_dims 64 128 256 512 768 1024
+    --nested_dims 64 128 256 512 768 896

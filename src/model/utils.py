@@ -79,3 +79,29 @@ def parse_layer_type(str_ranges, L, default=0):
             end = L - 1
         result[start:end + 1] = [value] * (end - start + 1)
     return result
+
+def unnorm_pooling(self, last_hidden_state, attention_mask):
+    if self.pooling == 'last' or self.pooling == 'eos':
+        if getattr(self, "model_backbone", None) in ['qwen3_vl']:
+            # print("Applying pooling for Qwen3VL backbone")
+            flipped_tensor = attention_mask.flip(dims=[1])
+            last_one_positions = flipped_tensor.argmax(dim=1)
+            col = attention_mask.shape[1] - last_one_positions - 1
+            row = torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device)
+            return last_hidden_state[row, col]
+        else:
+            left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
+            batch_size = last_hidden_state.shape[0]
+            if left_padding:
+                # Get the vectors at the last position
+                reps = last_hidden_state[torch.arange(batch_size), -1, :]
+            else:
+                # Calculate last 1 position in the original tensor
+                max_length = last_hidden_state.size(1)
+                invert_mask = (attention_mask == 0).long()
+                num_padding_tokens = invert_mask.sum(dim=1)
+                eos_indices_positive = max_length - num_padding_tokens - 1
+                # Get the vectors at the last 1 position of each attention mask
+                reps = last_hidden_state[
+                    torch.arange(batch_size, device=last_hidden_state.device), eos_indices_positive]
+            return reps
