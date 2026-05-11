@@ -20,7 +20,7 @@ torchrun \
     --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --learning_rate 5e-5 \
-    --num_train_epochs 2 \
+    --num_train_epochs 1 \
     --save_total_limit 5 \
     --logging_steps 1 \
     --save_strategy epoch \
@@ -36,7 +36,7 @@ torchrun \
     --stage1_projection_spec "896->768,768->512,512->256,256->128,128->64" \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.8,128:0.8,256:0.8,512:0.8,768:0.8" \
+    --align_l1_weights "64:0.75,128:0.75,256:0.75,512:0.75,768:0.75" \
     --orthogonal_weight 0.01 \
     --projection_orthogonal_map cayley \
     --spectrum_kl_weight 0.25 \
