@@ -1,6 +1,6 @@
 python eval_mmeb.py \
-    --model_name ./training/AdaptiveMRL_fastVLM_combine/checkpoint-epoch-1 \
-    --encode_output_path ./MMEB-evaloutputs/fastvlm_adaptive_mrl_combine2/ \
+    --model_name ./training/AdaptiveMRL_fastVLM_combine_laplacian_cayley/checkpoint-epoch-1 \
+    --encode_output_path ./MMEB-evaloutputs/fastvlm_adaptive_mrl_combine_laplacian_cayley/ \
     --pooling eos \
     --model_backbone "llava_qwen2" \
     --normalize True \
