@@ -7,7 +7,7 @@ from typing import List, Dict
 
 from src.model.utils import unnorm_pooling
 from .utils import count_clean_text_tokens, get_unpadded_hidden
-
+import math
 
 class SpreadLoss(nn.Module):
     def __init__(self, args):
@@ -37,84 +37,101 @@ class SpreadLoss(nn.Module):
     
     
 
-    def create_semi_orthogonal_matrix(self, tensor):
-        orig_dtype = tensor.dtype  # lưu dtype ban đầu (fp16)
-        
-        tensor = tensor.to(torch.float32)  # cast lên fp32
-
-        rows, cols = tensor.shape
-        if rows >= cols:
-            q, _ = torch.linalg.qr(tensor, mode='reduced')
-            w = q[:, :cols]
-        else:
-            q, _ = torch.linalg.qr(tensor, mode='reduced')
-            w = q.T[:rows, :]
-
-        w = w.to(orig_dtype)  # cast về lại fp16
-        return w
-    
     @torch.no_grad()
-    def power_iteration_pca(
+    def batched_ns_orthogonalize(self, Q, ns_iters=5, eps=1e-6):
+        """
+        Q: [B, D, r]
+        return Q_orth: [B, D, r], Q^T Q ≈ I
+        """
+        B, D, r = Q.shape
+        I = torch.eye(r, device=Q.device, dtype=Q.dtype).unsqueeze(0)  # [1, r, r]
+
+        G = Q.transpose(1, 2) @ Q        # [B, r, r]
+
+        g_norm = G.norm(dim=(1, 2), keepdim=True) + eps  # [B,1,1]
+        G_scaled = G / g_norm
+
+        Y = G_scaled
+        Z = I.repeat(B, 1, 1)
+
+        for _ in range(ns_iters):
+            T = 0.5 * (3.0 * I - Z @ Y)
+            Y = Y @ T
+            Z = T @ Z
+
+        Z = Z / torch.sqrt(g_norm)
+
+        Q = Q @ Z                        # [B, D, r]
+        return Q
+
+
+    @torch.no_grad()
+    def ese_batch_project_newton_schulz(
         self,
-        X,
-        r=256,
-        power_iters=2,
+        x,
+        r=128,
+        power_iters=3,
         ns_iters=5,
         eps=1e-6,
     ):
         """
-        PCA/subspace estimation bằng power iteration + Newton-Schulz.
+        ESE-style batch compression bằng Newton-Schulz.
 
         Args:
-            X: [N, D] token/features đã flatten và remove padding.
-            r: số principal directions.
-            power_iters: số lần subspace iteration.
-            ns_iters: số bước Newton-Schulz.
-            eps: stability.
+            x: [B, D]
+            r: target dim
 
         Returns:
-            Q: [D, r] orthonormal principal subspace basis.
+            z:  [B, r]      compressed target
+            Ak: [B, D, r]   approximate U Sigma
+            Q:  [B, D, r]   approximate top-left singular basis U
         """
-        N, D = X.shape
+        B, D = x.shape
 
-        # # Bước 0 (Khuyến nghị cho PCA thực sự): Trung bình hóa dữ liệu nếu X chưa được center
-        # X = X - X.mean(dim=0, keepdim=True)
+        # ------------------------------------------------
+        # 1. ESE inner-dependency matrix for whole batch
+        # A_b = softmax(x_b x_b^T / sqrt(D))
+        # ------------------------------------------------
+        x_col = x.unsqueeze(-1)           # [B, D, 1]
+        x_row = x.unsqueeze(1)            # [B, 1, D]
 
-        # random init
-        Q = torch.randn(D, r, device=X.device, dtype=X.dtype)
-        Q = Q / (Q.norm(dim=0, keepdim=True) + eps)
+        A = torch.softmax(
+            (x_col @ x_row) / math.sqrt(D),
+            dim=-1,
+        )                                # [B, D, D]
 
-        I = torch.eye(r, device=X.device, dtype=X.dtype)
+        # ------------------------------------------------
+        # 2. Power iteration on A A^T
+        # because A is not symmetric after row-softmax
+        # ------------------------------------------------
+        Q = torch.randn(B, D, r, device=x.device, dtype=x.dtype)
+        Q = Q / (Q.norm(dim=1, keepdim=True) + eps)
 
         for _ in range(power_iters):
-            # power iteration: Q <- X^T X Q
-            Q = X.T @ (X @ Q)
+            Q = A @ (A.transpose(1, 2) @ Q)        # [B, D, r]
+            Q = self.batched_ns_orthogonalize(Q, ns_iters=ns_iters, eps=eps)
 
-            # ---------- orthogonalization ----------
-            G = Q.T @ Q
+        # Q ≈ U_r
 
-            # Lưu lại norm để scale ngược lại sau Newton-Schulz
-            g_norm = G.norm() + eps
-            
-            # stability normalization để đảm bảo hội tụ
-            G_scaled = G / g_norm
+        # ------------------------------------------------
+        # 3. Approximate ESE A_k = U_r Sigma_r
+        # sigma_i ≈ ||A^T u_i|| or ||A u_i||
+        # Better for left singular vector u_i:
+        # sigma_i = ||A^T u_i||
+        # ------------------------------------------------
+        ATQ = A.transpose(1, 2) @ Q                # [B, D, r]
+        sigma = ATQ.norm(dim=1) + eps              # [B, r]
 
-            # Newton-Schulz inverse sqrt
-            Y = G_scaled
-            Z = I.clone()
+        Ak = Q * sigma.unsqueeze(1)                # [B, D, r] ≈ U Sigma
 
-            for _ in range(ns_iters):
-                T = 0.5 * (3.0 * I - Z @ Y)
-                Y = Y @ T
-                Z = T @ Z
+        # ------------------------------------------------
+        # 4. ESE compressed embedding:
+        # z = A_k^T x
+        # ------------------------------------------------
+        z = Ak.transpose(1, 2) @ x.unsqueeze(-1)   # [B, r, 1]
+        z = z.squeeze(-1)                          # [B, r]
 
-            # Bù lại hệ số scale đã chia ở trên: Z_true = Z / sqrt(g_norm)
-            Z = Z / torch.sqrt(g_norm)
-
-            # orthogonalize
-            Q = Q @ Z
-
-        return Q
+        return z, Ak, Q
 
 
     def forward(self, model_trainer, input_data):
@@ -170,125 +187,42 @@ class SpreadLoss(nn.Module):
         if self.average_loss and num_dims > 0:
             contrastive_loss = contrastive_loss / num_dims
 
-        student_special_ids = torch.tensor(
-            list(set(list(tokenizer.added_tokens_encoder.values()) +
-                    tokenizer.all_special_ids)),
-            device=device,
-            dtype=torch.long
-        )
-
-        num_student_text_qry_tokens = count_clean_text_tokens(student_input_qry, student_special_ids)
-        num_student_text_pos_tokens = count_clean_text_tokens(student_input_pos, student_special_ids)
-
-        cur_idx_qry_img = 0
-        cur_idx_pos_img = 0
-
-        valid_qry_tokens = []
-        valid_pos_tokens = []
-
-        for i in range(bs):
-            # 1. QUERY Processing
-            if student_qry_image_features is not None and \
-                cur_idx_qry_img < len(student_qry_image_features):
-                # --- Vision ---
-                stu_feat = student_qry_image_features[cur_idx_qry_img]
-        
-                # --- Text (Multimedia case) ---
-                last_unpadded_hidden_state = get_unpadded_hidden(
-                    student_qry_hidden_states[-1][i],
-                    num_student_text_qry_tokens[i].item(),
-                    stu_feat.size(0),
-                    student_input_qry['attention_mask'][i]
-                )
-                valid_qry_tokens.append(last_unpadded_hidden_state)
-                cur_idx_qry_img += 1
-            else:
-                # --- Text Only case ---
-                last_unpadded_hidden_state = get_unpadded_hidden(
-                    student_qry_hidden_states[-1][i],
-                    num_student_text_qry_tokens[i].item(),
-                    0,
-                    student_input_qry['attention_mask'][i]
-                )
-                valid_qry_tokens.append(last_unpadded_hidden_state)
-
-            # 2. POS Processing
-            if student_pos_image_features is not None and \
-                cur_idx_pos_img < len(student_pos_image_features):
-                # --- Vision ---
-                stu_feat = student_pos_image_features[cur_idx_pos_img]
-        
-                # --- Text (Multimedia case) ---
-                last_unpadded_hidden_state = get_unpadded_hidden(
-                    student_pos_hidden_states[-1][i],
-                    num_student_text_pos_tokens[i].item(),
-                    stu_feat.size(0),
-                    student_input_pos['attention_mask'][i]
-                )
-                valid_pos_tokens.append(last_unpadded_hidden_state)
-                cur_idx_pos_img += 1
-            else:
-                # --- Text Only case ---
-                last_unpadded_hidden_state = get_unpadded_hidden(
-                    student_pos_hidden_states[-1][i],
-                    num_student_text_pos_tokens[i].item(),
-                    0,
-                    student_input_pos['attention_mask'][i]
-                )
-                valid_pos_tokens.append(last_unpadded_hidden_state)
-
-        valid_qry_tokens = torch.cat(valid_qry_tokens, dim=0)  # [num_valid_tokens, hidden_dim]
-        valid_pos_tokens = torch.cat(valid_pos_tokens, dim=0)  # [num_valid_tokens, hidden_dim]
-
-        valid_full_tokens = torch.cat([valid_qry_tokens, valid_pos_tokens], dim=0)
-
         cnt = 0
         kd_loss = 0.0
 
-        N, full_dim = valid_full_tokens.shape
+        full_rep = torch.cat([all_student_qry_reps, all_student_pos_reps], dim=0)
 
-        for i, dim in enumerate(nested_dims):
+        for dim in nested_dims:
             if dim >= full_dim:
                 continue
-            
-            # 1. Chốt số chiều an toàn (actual_dim)
-            actual_dim = min(N, dim)
-            
+
             cnt += 1
-            
-            # ==========================================
-            # LUỒNG 1: TẠO TEACHER TỪ FULL TOKENS
-            # ==========================================
-            Q_teacher = self.power_iteration_pca(valid_full_tokens, actual_dim)
-            
-            teacher_projected = valid_full_tokens @ Q_teacher
 
-            # ==========================================
-            # LUỒNG 2: TẠO STUDENT TỪ SLICED TOKENS
-            # ==========================================
-            # Cắt lấy không gian dim chiều
-            student_sliced = valid_full_tokens[:, :dim]  # [N, dim]
-            
-            # DÙNG PCA CHIẾU SLICED TOKENS VỀ ACTUAL_DIM
-            Q_student = self.power_iteration_pca(student_sliced, actual_dim)
+            with torch.no_grad():
+                target_k, _, _ = self.ese_batch_project_newton_schulz(
+                    full_rep,
+                    r=dim,
+                    power_iters=3,
+                    ns_iters=5,
+                )   # [B, dim]
+                target_k = F.normalize(target_k, p=2, dim=1)
 
-            # Chiếu Sliced Tokens xuống actual_dim -> [N, actual_dim]
-            student_projected = student_sliced @ Q_student
+            student_k = F.normalize(full_rep[:, :dim], p=2, dim=1)  # [B, dim]
 
-            # ==========================================
-            # LUỒNG 3: CHUẨN HÓA VÀ TÍNH LOSS
-            # ==========================================
-            teacher_norm = F.normalize(teacher_projected, p=2, dim=-1)
-            student_norm = F.normalize(student_projected, p=2, dim=-1)
+            mse = F.mse_loss(student_k, target_k)
 
-            # Ép Student PCA Subspace học theo Teacher PCA Subspace
-            loss_dim = F.mse_loss(student_norm, teacher_norm.detach())
-            
-            kd_loss += loss_dim
+            kl = F.kl_div(
+                F.log_softmax(student_k, dim=-1),
+                F.softmax(target_k, dim=-1),
+                reduction="batchmean",
+            )
+
+            loss_dim = mse + kl
+            kd_loss = kd_loss + loss_dim
 
         if cnt > 0:
             kd_loss = kd_loss / cnt
-        
+        # print(f"KD Loss: {kd_loss.item():.4f}")
         total_loss = contrastive_loss + self.kd_weight * kd_loss
         result = {
             "loss": total_loss,
