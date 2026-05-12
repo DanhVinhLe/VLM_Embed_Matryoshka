@@ -19,7 +19,6 @@ torchrun \
     --output_dir "training/MSE_fastVLM_cls_b8_spread" \
     --per_device_train_batch_size 8 \
     --gradient_accumulation_steps 1 \
-    --kd_loss_type "mrl" \
     --lr_scheduler_type cosine \
     --learning_rate 5e-5 \
     --num_train_epochs 1 \
