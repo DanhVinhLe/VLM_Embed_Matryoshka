@@ -1,4 +1,7 @@
-# Recommended FastVLM Adaptive MRL Stage-1 config (keeps batch size and epochs unchanged).
+# Recommended FastVLM Adaptive MRL Stage-1 config.
+# CLS tasks are more memory-sensitive than VQA, so the default uses micro-batch 16
+# with accumulation 2 to keep the previous effective batch size of 32. Override with
+# PER_DEVICE_BATCH_SIZE=... GRAD_ACCUM_STEPS=... if your GPU has more headroom.
 # Key changes vs baseline: lower LR + cosine decay, longer warmup, tuned projection weights,
 # and slightly stronger spectrum regularization for more stable nested-dimension quality.
 #
@@ -10,6 +13,8 @@
 
 ORTHO_MAP=""
 ORTHO_WEIGHT=0.001
+PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-16}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-2}"
 
 # Compatibility mode for the previous non-Cayley orthogonal-loss setup.
 # Usage: USE_PREVIOUS_ORTHO_LOSS=1 bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
@@ -46,8 +51,8 @@ torchrun \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
     --output_dir training/AdaptiveMRL_fastVLM_stage1_cls \
-    --per_device_train_batch_size 32 \
-    --gradient_accumulation_steps 1 \
+    --per_device_train_batch_size "${PER_DEVICE_BATCH_SIZE}" \
+    --gradient_accumulation_steps "${GRAD_ACCUM_STEPS}" \
     --learning_rate 3e-5 \
     --num_train_epochs 1 \
     --save_total_limit 5 \
