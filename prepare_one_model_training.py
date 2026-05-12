@@ -165,6 +165,12 @@ class OneModelTrainer(nn.Module):
 
         checkpoint_target = model.encoder if hasattr(model, "encoder") else model
         gradient_checkpointing_kwargs = getattr(self.training_args, "gradient_checkpointing_kwargs", None) or {}
+        if isinstance(gradient_checkpointing_kwargs, str):
+            gradient_checkpointing_kwargs = json.loads(gradient_checkpointing_kwargs)
+        else:
+            gradient_checkpointing_kwargs = dict(gradient_checkpointing_kwargs)
+        # Reentrant checkpointing can mark shared LoRA parameters ready more than once under DDP.
+        gradient_checkpointing_kwargs.setdefault("use_reentrant", False)
 
         if hasattr(checkpoint_target, "config") and hasattr(checkpoint_target.config, "use_cache"):
             checkpoint_target.config.use_cache = False
