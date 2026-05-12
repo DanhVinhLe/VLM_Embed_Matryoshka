@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import PIL
 import argparse
+import inspect
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -158,11 +159,39 @@ class OneModelTrainer(nn.Module):
             f"Attached matryoshka projection bank with {len(dimension_pairs)} matrices over dims {valid_dims}"
         )
 
+    def _enable_gradient_checkpointing(self, model):
+        if not getattr(self.training_args, "gradient_checkpointing", False):
+            return
+
+        checkpoint_target = model.encoder if hasattr(model, "encoder") else model
+        gradient_checkpointing_kwargs = getattr(self.training_args, "gradient_checkpointing_kwargs", None) or {}
+
+        if hasattr(checkpoint_target, "config") and hasattr(checkpoint_target.config, "use_cache"):
+            checkpoint_target.config.use_cache = False
+        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
+
+        if hasattr(checkpoint_target, "enable_input_require_grads"):
+            checkpoint_target.enable_input_require_grads()
+
+        if not hasattr(checkpoint_target, "gradient_checkpointing_enable"):
+            print_rank("Warning: --gradient_checkpointing was set, but the loaded model does not expose gradient_checkpointing_enable().")
+            return
+
+        enable_fn = checkpoint_target.gradient_checkpointing_enable
+        signature = inspect.signature(enable_fn)
+        if "gradient_checkpointing_kwargs" in signature.parameters:
+            enable_fn(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
+        else:
+            enable_fn()
+        print_rank("Enabled gradient checkpointing for custom DDP training loop.")
+
     def _load_model(self):
         if self.model_args.lora:
             print("Load model with lora rank:", self.model_args.lora_r)
             print("Student use lora:", self.model_args.lora)
         model = MMEBModel.build(self.model_args)
+        self._enable_gradient_checkpointing(model)
         model.train()
         model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         print("Model built.")
