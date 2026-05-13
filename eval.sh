@@ -1,14 +1,14 @@
 python eval_mmeb.py \
-    --model_name ./training/AdaptiveMRL_fastVLM_combine_laplacian_cayley/checkpoint-epoch-1 \
-    --encode_output_path ./MMEB-evaloutputs/fastvlm_adaptive_mrl_combine_laplacian_cayley/ \
+    --model_name ./training/AdaptiveMRL_fastVLM_cls/checkpoint-epoch-1 \
+    --encode_output_path ./MMEB-evaloutputs/fastvlm_adaptive_cls2/ \
     --pooling eos \
     --model_backbone "llava_qwen2" \
     --normalize True \
     --bf16 \
     --dataset_name TIGER-Lab/MMEB-eval \
-    --subset_name  OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
+    --subset_name  "ImageNet-1K" "N24News" "HatefulMemes" "VOC2007" "SUN397" \
     --dataset_split test \
-    --per_device_eval_batch_size 32 \
+    --per_device_eval_batch_size 10 \
     --image_resolution mid \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/eval_images" \
     --tgt_prefix_mod \
