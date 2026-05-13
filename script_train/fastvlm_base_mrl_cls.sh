@@ -1,0 +1,35 @@
+torchrun \
+    --standalone \
+    --nproc_per_node=1 \
+    --master_port=29500 \
+    train_ddp_one_model.py \
+    --lora \
+    --lora_r 64 \
+    --lora_alpha 128 \
+    --model_name apple/FastVLM-0.5B \
+    --model_backbone "llava_qwen2" \
+    --bf16 \
+    --pooling eos \
+    --normalize True \
+    --temperature 0.02 \
+    --dataset_name "TIGER-Lab/MMEB-train" \
+    --subset_name "ImageNet_1K" "N24News" "HatefulMemes" "VOC2007" "SUN397" \
+    --dataset_split "original" \
+    --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
+    --output_dir "training/MRL_fastVLM_cls" \
+    --per_device_train_batch_size 32 \
+    --gradient_accumulation_steps 1 \
+    --kd_loss_type "mrl" \
+    --lr_scheduler_type cosine \
+    --learning_rate 5e-5 \
+    --num_train_epochs 2 \
+    --bf16 \
+    --save_total_limit 5 \
+    --logging_steps 1 \
+    --save_strategy "epoch" \
+    --seed 42 \
+    --weight_decay 0.01 \
+    --kd_loss_type mrl \
+    --warmup_ratio 0.03 \
+    --image_resolution mid \
+    --nested_dims 64 128 256 512 768 896
