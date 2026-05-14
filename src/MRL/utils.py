@@ -78,3 +78,36 @@ def get_hidden_text(hidden_state, num_text_token, attention_mask):
         text_hidden_state = hidden_state[: num_text_token, :]
    
     return text_hidden_state
+
+
+def get_full_attention_mask(hidden_state, num_text_token, num_vision_token, partial_attention_mask):
+    '''
+    Tạo ra full attention mask (1 cho token thật, 0 cho padding)
+    Args:
+        hidden_state: tensor shape [sequence_length, hidden_dim]
+        num_text_token: int, số lượng text tokens
+        num_vision_token: int, số lượng vision tokens
+        partial_attention_mask: tensor mask cũ dùng để check padding direction
+    Returns:
+        full_mask: tensor shape [sequence_length] chứa mask đầy đủ
+    '''
+    # Lấy chiều dài chuỗi từ hidden_state
+    seq_len = hidden_state.shape[0] 
+    
+    # Tổng số lượng token hợp lệ
+    num_valid_tokens = num_vision_token + num_text_token
+    
+    # Khởi tạo mask mới toàn số 0 (coi như tất cả là padding ban đầu)
+    full_mask = torch.zeros(seq_len, dtype=torch.long, device=hidden_state.device)
+    
+    # Xác định hướng padding từ mask đầu vào
+    left_padding = partial_attention_mask[0] == 0 and partial_attention_mask[-1] == 1
+    
+    if left_padding:
+        # Nếu left padding -> Token thật nằm ở CUỐI chuỗi
+        full_mask[-num_valid_tokens:] = 1
+    else:
+        # Nếu right padding -> Token thật nằm ở ĐẦU chuỗi
+        full_mask[:num_valid_tokens] = 1
+        
+    return full_mask

@@ -1,3 +1,5 @@
+from src.MRL.MIPIC import MIPICLoss
+
 from .eofd import EOFDLoss
 from .base_mrl import MatryoshkaContrastiveLoss
 from .ese import ESELoss
@@ -8,6 +10,7 @@ criterion_dict = {
     "ese": ESELoss,
     "eofd": EOFDLoss,  # Sử dụng cùng class nhưng sẽ có thêm phần effective rank penalty
     "spread": SpreadLoss,  # Sử dụng cùng class nhưng sẽ có thêm phần effective rank penalty
+    "mipic": MIPICLoss,  # Sử dụng cùng class nhưng sẽ có thêm phần effective rank penalty
 }
 
 def build_criterion(args):
