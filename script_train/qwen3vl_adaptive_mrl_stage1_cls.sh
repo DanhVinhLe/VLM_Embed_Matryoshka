@@ -13,10 +13,10 @@ torchrun \
     --normalize True \
     --temperature 0.02 \
     --dataset_name TIGER-Lab/MMEB-train \
-    --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
+    --subset_name "ImageNet_1K" "N24News" "HatefulMemes" "VOC2007" "SUN397" \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
-    --output_dir ./training/AdaptiveMRL_Qwen3_vqa \
+    --output_dir ./training/AdaptiveMRL_Qwen3_cls \
     --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --learning_rate 3e-5 \
@@ -45,5 +45,5 @@ torchrun \
     --laplacian_k_eig 16 \
     --laplacian_top_k -1 \
     --spectrum_kl_pair_weights "2048->1024:1.0,1024->768:1.0,768->512:1.0,512->256:0.8,256->128:0.8,128->64:0.6" \
-    --laplacian_pair_weights "2048->1024:1.0,1024->768:1.0,768->512:1.0,768->512:1.0,512->256:1.0,256->128:1.0,128->64:0.9" \
+    --laplacian_pair_weights "2048->1024:1.0,1024->768:1.0,768->512:1.0,768->512:1.0,512->256:1.0,256->128:1.0,128->64:1.0" \
     

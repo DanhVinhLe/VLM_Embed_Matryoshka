@@ -6,17 +6,17 @@ torchrun \
     --lora \
     --lora_r 16 \
     --lora_alpha 64 \
-    --model_name Qwen/Qwen3-VL-Embedding-2B \
-    --model_backbone qwen3_vl \
+    --model_name Qwen/Qwen2-VL-2B \
+    --model_backbone qwen2_vl \
     --bf16 \
     --pooling eos \
     --normalize True \
     --temperature 0.02 \
     --dataset_name TIGER-Lab/MMEB-train \
-    --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
+    --subset_name "ImageNet_1K" "N24News" "HatefulMemes" "VOC2007" "SUN397" \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
-    --output_dir ./training/AdaptiveMRL_Qwen3_vqa \
+    --output_dir ./training/AdaptiveMRL_Qwen2_cls \
     --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
     --learning_rate 3e-5 \
@@ -31,9 +31,10 @@ torchrun \
     --optimizer_name adamw \
     --image_resolution mid \
     --kd_loss_type adaptive_mrl_stage1 \
-    --nested_dims 64 128 256 512 768 1024 2048 \
+    --nested_dims 64 128 256 512 768 1024 1536 \
     --stage1_phase all \
-    --stage1_projection_spec "2048->1024,1024->768,768->512,512->256,256->128,128->64" \
+    --stage1_projection_spec "1536->1024,1024->768,768->512,512->256,256->128,128->64" \
+    --stage1_projection_weights "1536->1024:1.0,1024->768:1.0,768->512:1.0,512->256:1.2,256->128:1.1,128->64:0.8" \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
     --align_l1_weights "64:0.6,128:0.8,256:0.8,512:0.9,768:1.0,1024:1.0" \
@@ -44,6 +45,6 @@ torchrun \
     --laplacian_tau 0.07 \
     --laplacian_k_eig 16 \
     --laplacian_top_k -1 \
-    --spectrum_kl_pair_weights "2048->1024:1.0,1024->768:1.0,768->512:1.0,512->256:0.8,256->128:0.8,128->64:0.6" \
-    --laplacian_pair_weights "2048->1024:1.0,1024->768:1.0,768->512:1.0,768->512:1.0,512->256:1.0,256->128:1.0,128->64:0.9" \
-    
+    --spectrum_kl_pair_weights "896->768:0.8,768->512:1.0,512->256:1.2,256->128:1.0,128->64:0.8" \
+    --laplacian_pair_weights "1536->1024:1.0,1024->768:1.0,768->512:1.0,512->256:1.0,256->128:1.0,128->64:0.8"
+
