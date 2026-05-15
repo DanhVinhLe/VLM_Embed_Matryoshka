@@ -45,9 +45,9 @@ torchrun \
     --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
-    --output_dir training/qwen2vl_stage1_best \
-    --per_device_train_batch_size 8 \
-    --gradient_accumulation_steps 4 \
+    --output_dir training/qwen2vl_stage1_vqa \
+    --per_device_train_batch_size 32 \
+    --gradient_accumulation_steps 1 \
     --learning_rate 3e-5 \
     --num_train_epochs 2 \
     --save_total_limit 5 \
