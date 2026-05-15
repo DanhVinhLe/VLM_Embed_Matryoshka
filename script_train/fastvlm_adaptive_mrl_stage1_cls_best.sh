@@ -1,4 +1,7 @@
-# Recommended FastVLM Adaptive MRL Stage-1 config (keeps batch size and epochs unchanged).
+# Recommended FastVLM Adaptive MRL Stage-1 config.
+# CLS tasks are more memory-sensitive than VQA, so the default uses micro-batch 16
+# with accumulation 2 to keep the previous effective batch size of 32. Override with
+# PER_DEVICE_BATCH_SIZE=... GRAD_ACCUM_STEPS=... if your GPU has more headroom.
 # Key changes vs baseline: lower LR + cosine decay, longer warmup, tuned projection weights,
 # and slightly stronger spectrum regularization for more stable nested-dimension quality.
 #
@@ -10,6 +13,8 @@
 
 ORTHO_MAP=""
 ORTHO_WEIGHT=0.001
+PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-16}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-2}"
 
 # Compatibility mode for the previous non-Cayley orthogonal-loss setup.
 # Usage: USE_PREVIOUS_ORTHO_LOSS=1 bash script_train/fastvlm_adaptive_mrl_stage1_vqa_best.sh
@@ -42,14 +47,14 @@ torchrun \
     --normalize True \
     --temperature 0.02 \
     --dataset_name TIGER-Lab/MMEB-train \
-    --subset_name OK-VQA A-OKVQA DocVQA InfographicsVQA ChartQA Visual7W \
+    --subset_name "ImageNet_1K" "N24News" "HatefulMemes" "VOC2007" "SUN397" \
     --dataset_split original \
     --image_dir "/home/gdi-user/enguyen/research_vllm/test/VLM_Embed/vlm2vec_train/MMEB-train" \
-    --output_dir training/AdaptiveMRL_fastVLM_stage1_best \
-    --per_device_train_batch_size 32 \
-    --gradient_accumulation_steps 1 \
-    --learning_rate 3e-5 \
-    --num_train_epochs 1 \
+    --output_dir training/AdaptiveMRL_fastVLM_cls \
+    --per_device_train_batch_size "${PER_DEVICE_BATCH_SIZE}" \
+    --gradient_accumulation_steps "${GRAD_ACCUM_STEPS}" \
+    --learning_rate 3e-4 \
+    --num_train_epochs 2 \
     --save_total_limit 5 \
     --logging_steps 1 \
     --save_strategy epoch \
@@ -66,7 +71,7 @@ torchrun \
     --stage1_projection_weights "896->768:1.0,768->512:1.0,512->256:1.2,256->128:1.1,128->64:0.8" \
     --align_l1_weight 1.0 \
     --full_dim_l1_weight 0.0 \
-    --align_l1_weights "64:0.6,128:0.8,256:1.0,512:1.0,768:0.9" \
+    --align_l1_weights "64:1.0,128:1.0,256:1.0,512:1.0,768:1.0" \
     --orthogonal_weight "${ORTHO_WEIGHT}" \
     --projection_orthogonal_map "${ORTHO_MAP}" \
     --spectrum_kl_weight 0.35 \
@@ -75,4 +80,4 @@ torchrun \
     --laplacian_k_eig 16 \
     --laplacian_top_k -1 \
     --spectrum_kl_pair_weights "896->768:0.8,768->512:1.0,512->256:1.2,256->128:1.0,128->64:0.8" \
-    --laplacian_pair_weights "896->768:1.0,768->512:1.0,512->256:1.0,256->128:1.0,128->64:0.8"
+    --laplacian_pair_weights "896->768:1.0,768->512:1.0,512->256:1.0,256->128:1.0,128->64:1.0"

@@ -194,7 +194,8 @@ class Trainer:
         
         self.trainer = DDP(self.trainer, 
                              device_ids=[self.gpu_id],
-                             find_unused_parameters=False)
+                             find_unused_parameters=False,
+                             static_graph=getattr(training_args, "gradient_checkpointing", False))
     
     def _debug_batch_devices(self, obj, prefix=""):
         if obj is None:
