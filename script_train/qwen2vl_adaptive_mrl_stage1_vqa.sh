@@ -34,8 +34,8 @@ torchrun \
     --lora_r 64 \
     --lora_alpha 128 \
     --lora_dropout 0.05 \
-    --model_name apple/FastVLM-0.5B \
-    --model_backbone llava_qwen2 \
+    --model_name Qwen/Qwen2-VL-2B \
+    --model_backbone qwen2_vl \
     --bf16 \
     --gradient_checkpointing \
     --pooling eos \
