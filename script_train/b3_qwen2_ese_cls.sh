@@ -5,6 +5,7 @@ torchrun \
     train_ddp_one_model.py \
     --lora \
     --lora_r 8 \
+    --load_pretrained_lora \
     --lora_alpha 16 \
     --model_name raghavlite/B3_Qwen2_2B \
     --model_backbone "qwen2_vl" \

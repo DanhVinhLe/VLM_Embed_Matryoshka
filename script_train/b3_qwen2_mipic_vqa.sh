@@ -4,6 +4,7 @@ torchrun \
     --master_port=29500 \
     train_ddp_one_model.py \
     --lora \
+    --load_pretrained_lora \
     --lora_r 8 \
     --lora_alpha 16 \
     --model_name raghavlite/B3_Qwen2_2B \
