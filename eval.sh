@@ -1,6 +1,6 @@
 python eval_mmeb.py \
-    --model_name training/MSE_fastVLM_cls_b8_project_adjacent_cross_contrastive2_unnorm_orthogonal_maxdim_detach/checkpoint-epoch-0 \
-    --encode_output_path MMEB-evaloutputs/MSE_fastVLM_cls_b8_project_adjacent_cross_contrastive2_unnorm_orthogonal_maxdim_detach \
+    --model_name training/MSE_fastVLM_cls_b8_spread/checkpoint-epoch-0 \
+    --encode_output_path MMEB-evaloutputs/MSE_fastVLM_cls_b8_spread \
     --pooling eos \
     --model_backbone llava_qwen2 \
     --normalize True \
