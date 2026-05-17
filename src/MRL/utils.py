@@ -111,3 +111,41 @@ def get_full_attention_mask(hidden_state, num_text_token, num_vision_token, part
         full_mask[:num_valid_tokens] = 1
         
     return full_mask
+
+
+def get_text_only_attention_mask(hidden_state, num_text_token, num_vision_token, partial_attention_mask):
+    '''
+    Tạo ra mask CHỈ DÀNH CHO TEXT (1 cho text token, 0 cho vision token và padding)
+    Args:
+        hidden_state: tensor shape [sequence_length, hidden_dim]
+        num_text_token: int, số lượng text tokens
+        num_vision_token: int, số lượng vision tokens
+        partial_attention_mask: tensor mask cũ dùng để check padding direction
+    Returns:
+        text_mask: tensor shape [sequence_length] chứa mask chỉ text
+    '''
+    seq_len = hidden_state.shape[0] 
+    num_valid_tokens = num_vision_token + num_text_token
+    
+    # Khởi tạo mask mới toàn số 0 (coi như tất cả là padding/vision ban đầu)
+    text_mask = torch.zeros(seq_len, dtype=torch.long, device=hidden_state.device)
+    
+    # Nếu câu không có text nào thì trả về luôn mask toàn 0
+    if num_text_token == 0:
+        return text_mask
+        
+    # Xác định hướng padding từ mask đầu vào
+    left_padding = partial_attention_mask[0] == 0 and partial_attention_mask[-1] == 1
+    
+    if left_padding:
+        # LEFT PADDING: [Padding...] -> [Vision Tokens...] -> [Text Tokens...]
+        # Nghĩa là Text sẽ nằm gọn ở phần cuối cùng của chuỗi (last 'num_text_token' elements)
+        text_mask[-num_text_token:] = 1
+    else:
+        # RIGHT PADDING: [Vision Tokens...] -> [Text Tokens...] -> [Padding...]
+        # Bỏ qua đoạn đầu (thuộc về vision), bắt đầu từ 'num_vision_token'
+        text_start_idx = num_vision_token
+        text_end_idx = num_vision_token + num_text_token
+        text_mask[text_start_idx:text_end_idx] = 1
+        
+    return text_mask

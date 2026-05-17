@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import List, Dict, Optional, Tuple
 import math
-from .utils import count_clean_text_tokens, get_full_attention_mask, get_unpadded_hidden
+from .utils import count_clean_text_tokens, get_full_attention_mask, get_text_only_attention_mask, get_unpadded_hidden
 
 def Matry_infonce(a, b, temperature=0.07, nested_dims=[64, 128, 256, 512, 1024]):
     """
@@ -60,83 +60,6 @@ def Matry_infonce(a, b, temperature=0.07, nested_dims=[64, 128, 256, 512, 1024])
 
     return total_loss, all_logits
 
-class CKALoss(nn.Module):
-    """
-    CKA (Centered Kernel Alignment) Loss for measuring representation similarity
-    
-    Computes CKA per-example (using k tokens as samples) then averages over batch.
-    """
-    def __init__(self, eps=1e-8):
-        super().__init__()
-        self.eps = eps
-
-    def compute_cka_single(self, X, Y):
-        """
-        Compute CKA for a single example
-        
-        Args:
-            X: [n, p1] - n samples (tokens), p1 features
-            Y: [n, p2] - n samples (tokens), p2 features
-        
-        Returns:
-            CKA similarity score (scalar)
-        """
-        # Convert to float64 for numerical stability
-        X = X.to(torch.float64)
-        Y = Y.to(torch.float64)
-        
-        # Center the representations (zero mean across samples)
-        X = X - X.mean(0, keepdim=True)
-        Y = Y - Y.mean(0, keepdim=True)
-        
-        # Compute Gram matrices: K = XX^T, L = YY^T
-        # Then compute HSIC using Frobenius norm
-        # CKA = ||X^T Y||_F^2 / (||X^T X||_F * ||Y^T Y||_F)
-        
-        XTY = X.t().matmul(Y)  # [p1, p2]
-        XTX = X.t().matmul(X)  # [p1, p1]
-        YTY = Y.t().matmul(Y)  # [p2, p2]
-        
-        numerator = torch.norm(XTY, 'fro') ** 2
-        denominator = torch.norm(XTX, 'fro') * torch.norm(YTY, 'fro') + self.eps
-        
-        cka_sim = numerator / denominator
-        
-        return cka_sim
-
-    def forward(self, SH, TH):
-        """
-        Args:
-            SH: Student hidden states [B, k, d_s] or [k, d_s]
-            TH: Teacher hidden states [B, k, d_t] or [k, d_t]
-        
-        Returns:
-            CKA distance (1 - CKA similarity), averaged over batch
-        """
-        # Check if batched input
-        if SH.dim() == 3:  # [B, k, d_s]
-            B, k, d_s = SH.shape
-            _, _, d_t = TH.shape
-            
-            # Compute CKA per-example
-            cka_sims = []
-            for i in range(B):
-                cka_sim = self.compute_cka_single(SH[i], TH[i])  # Each is [k, d]
-                cka_sims.append(cka_sim)
-            
-            # Average over batch
-            avg_cka_sim = torch.stack(cka_sims).mean()
-            
-        elif SH.dim() == 2:  # [k, d_s] - single example
-            avg_cka_sim = self.compute_cka_single(SH, TH)
-            
-        else:
-            raise ValueError(f"Expected 2D or 3D input, got shape {SH.shape}")
-        
-        # Return distance (1 - similarity) for minimization
-        return 1.0 - avg_cka_sim.float()
-
-
 # ============================================================
 # 2. HorizontalAttentionAlignment Module (FIXED)
 # ============================================================
@@ -164,16 +87,16 @@ class VLMHorizontalAttentionAlignment(nn.Module):
         self.W_Q = nn.Linear(d_att, d_att)
         self.W_K = nn.Linear(d_att, d_att)
 
-    def get_query_tokens(self, hidden_proj, attention_mask):
+    def get_query_tokens(self, hidden_proj, full_attention_mask):
         """
-        Lấy token đại diện (EOS/Pooling token) làm Query thay vì mặc định lấy index 0 như BERT.
-        VLM thường dùng token hợp lệ cuối cùng.
+        Lấy token đại diện (EOS/Pooling token) làm Query.
+        Phải dùng full_attention_mask để tính đúng index vật lý của token.
         """
         batch_size = hidden_proj.shape[0]
         query_tokens = []
         
         for i in range(batch_size):
-            mask_i = attention_mask[i]
+            mask_i = full_attention_mask[i]
             # Nếu là left padding (số 0 ở đầu, 1 ở cuối) -> token cuối là index -1
             if mask_i[0] == 0 and mask_i[-1] == 1:
                 q_token = hidden_proj[i, -1, :]
@@ -185,12 +108,12 @@ class VLMHorizontalAttentionAlignment(nn.Module):
             
         return torch.stack(query_tokens, dim=0) # [B, d_att]
 
-    def compute_attention_dist(self, hidden, proj, mask, temperature=1.0):
+    def compute_attention_dist(self, hidden, proj, full_mask, text_mask, temperature=1.0):
         # 1. Project xuống không gian d_att chung
         h_proj = proj(hidden)  # [B, L, d_att]
         
-        # 2. Lấy Query (từ token đại diện) và Key (từ toàn bộ token)
-        q_global = self.get_query_tokens(h_proj, mask) # [B, d_att]
+        # 2. Lấy Query (từ token đại diện bằng full_mask) và Key
+        q_global = self.get_query_tokens(h_proj, full_mask) # [B, d_att]
         q = self.W_Q(q_global) # [B, d_att]
         k = self.W_K(h_proj)   # [B, L, d_att]
         
@@ -198,16 +121,17 @@ class VLMHorizontalAttentionAlignment(nn.Module):
         scores = torch.matmul(q.unsqueeze(1), k.transpose(1, 2)).squeeze(1) # [B, L]
         scores = scores / math.sqrt(self.d_att)
         
-        # 4. Masking: Gán -inf cho padding để softmax ra 0
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+        # 4. Masking: Gán -inf cho những token KHÔNG PHẢI TEXT (Dùng text_mask)
+        # Điều này khiến softmax của ảnh và padding biến thành 0
+        if text_mask is not None:
+            scores = scores.masked_fill(text_mask == 0, float('-inf'))
             
         attn_probs = F.softmax(scores / temperature, dim=-1)
         return attn_probs, scores
 
-    def forward(self, h_small, h_full, mask, temperature=1.0):
-        small_probs, small_scores = self.compute_attention_dist(h_small, self.proj_small, mask, temperature)
-        full_probs, full_scores = self.compute_attention_dist(h_full, self.proj_full, mask, temperature)
+    def forward(self, h_small, h_full, full_mask, text_mask, temperature=1.0):
+        small_probs, small_scores = self.compute_attention_dist(h_small, self.proj_small, full_mask, text_mask, temperature)
+        full_probs, full_scores = self.compute_attention_dist(h_full, self.proj_full, full_mask, text_mask, temperature)
         
         # KL Divergence với epsilon tránh log(0)
         eps = 1e-8
@@ -220,78 +144,136 @@ class VLMHorizontalAttentionAlignment(nn.Module):
         return kl_loss, small_scores, full_scores
 
 
+class CKALoss(nn.Module):
+    """
+    CKA (Centered Kernel Alignment) Loss for measuring representation similarity
+    """
+    def __init__(self, eps=1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def compute_cka_single(self, X, Y):
+        """
+        Compute CKA for a single example (2D Tensors)
+        
+        Args:
+            X: [actual_k, d_small] - actual_k samples (tokens), d_small features
+            Y: [actual_k, d_full] - actual_k samples (tokens), d_full features
+        
+        Returns:
+            CKA similarity score (scalar)
+        """
+        # Convert to float64 for numerical stability during matrix multiplication
+        X = X.to(torch.float64)
+        Y = Y.to(torch.float64)
+        
+        # Center the representations (zero mean across samples)
+        X = X - X.mean(0, keepdim=True)
+        Y = Y - Y.mean(0, keepdim=True)
+        
+        # Compute Gram matrices and X^T * Y
+        XTY = X.t().matmul(Y)  # [d_small, d_full]
+        XTX = X.t().matmul(X)  # [d_small, d_small]
+        YTY = Y.t().matmul(Y)  # [d_full, d_full]
+        
+        # Compute HSIC using Frobenius norm
+        numerator = torch.norm(XTY, 'fro') ** 2
+        denominator = torch.norm(XTX, 'fro') * torch.norm(YTY, 'fro') + self.eps
+        
+        cka_sim = numerator / denominator
+        
+        return cka_sim
+
+    def forward(self, SH, TH):
+        """
+        Backward compatibility forward pass (if called directly with 3D tensors)
+        """
+        if SH.dim() == 3:  # [B, k, d_s]
+            B = SH.shape[0]
+            cka_sims = []
+            for i in range(B):
+                cka_sim = self.compute_cka_single(SH[i], TH[i])
+                cka_sims.append(cka_sim)
+            avg_cka_sim = torch.stack(cka_sims).mean()
+        elif SH.dim() == 2:  # [k, d_s]
+            avg_cka_sim = self.compute_cka_single(SH, TH)
+        else:
+            raise ValueError(f"Expected 2D or 3D input, got shape {SH.shape}")
+        
+        return 1.0 - avg_cka_sim.float()
+
+
 # ============================================================
-# 3. SubmatrixCKALoss Module (FIXED)
+# 3. SubmatrixCKALoss Module (DYNAMIC K PER ROW)
 # ============================================================
 class SubmatrixCKALoss(nn.Module):
     """
     Aligns geometric structure of top-k important tokens using CKA.
     Uses per-dim attention scores for token selection (self-distillation).
+    Handles dynamic 'k' per row to maximize information extraction.
     """
     def __init__(self, eps: float = 1e-8):
         super().__init__()
         self.cka_loss = CKALoss(eps=eps)
     
-    def select_top_k_tokens(
-        self,
-        hidden: torch.Tensor,  # [B, L, d]
-        selection_scores: torch.Tensor,  # [B, L] - per-dim attention scores
-        k: int,
-        mask: Optional[torch.Tensor] = None  # [B, L]
-    ) -> torch.Tensor:
-        """
-        Select top-k tokens based on per-dim attention scores.
-        
-        Args:
-            hidden: Hidden states [B, L, d]
-            selection_scores: Attention scores for THIS dimension [B, L]
-            k: Number of tokens to select
-            mask: Attention mask [B, L]
-        
-        Returns:
-            selected_hidden: [B, k, d]
-        """
-        B, L, d = hidden.shape
-        
-        # Apply mask to scores (set padded to -inf)
-        if mask is not None:
-            scores_masked = selection_scores.masked_fill(mask == 0, float('-inf'))
-        else:
-            scores_masked = selection_scores
-        
-        # Get top-k indices
-        _, top_k_indices = torch.topk(scores_masked, k=min(k, L), dim=1)  # [B, k]
-        
-        # Gather hidden states
-        # Expand indices to match hidden dimension
-        top_k_indices_expanded = top_k_indices.unsqueeze(-1).expand(-1, -1, d)  # [B, k, d]
-        selected_hidden = torch.gather(hidden, 1, top_k_indices_expanded)  # [B, k, d]
-        
-        return selected_hidden
-    
     def forward(
         self,
-        h_small: torch.Tensor,  # [B, L, d_small]
-        h_full: torch.Tensor,   # [B, L, d_full=1024]
-        small_scores: torch.Tensor,  # [B, L] - per-dim attention scores for small
-        k: int,
-        mask: Optional[torch.Tensor] = None
+        h_small: torch.Tensor,       # [B, L, d_small]
+        h_full: torch.Tensor,        # [B, L, d_full]
+        small_scores: torch.Tensor,  # [B, L] - per-dim attention scores
+        k: int,                      # Ideal k (theoretical maximum)
+        mask: Optional[torch.Tensor] = None # [B, L]
     ) -> torch.Tensor:
         """
-        Compute CKA loss on top-k token submatrices.
-        Uses per-dim attention scores for selection.
-        
-        Returns:
-            loss: 1 - CKA(small_sub, full_sub)
+        Compute CKA loss row-by-row to allow each sequence to have its own actual_k.
         """
-        # Select top-k tokens using PER-DIM scores
-        small_sub = self.select_top_k_tokens(h_small, small_scores, k, mask)  # [B, k, d_small]
-        full_sub = self.select_top_k_tokens(h_full, small_scores, k, mask)  # [B, k, d_full]
+        B, L, d_small = h_small.shape
+        total_cka_dist = 0.0
+        valid_items_in_batch = 0
         
-        # Use your CKA loss implementation
-        loss = self.cka_loss(small_sub, full_sub)
-        
-        return loss
+        # Duyệt qua từng câu trong Batch
+        for i in range(B):
+            scores_i = small_scores[i]  # [L]
+            
+            # 1. Xác định số lượng token thực tế cho câu này
+            if mask is not None:
+                # Che điểm của token không hợp lệ (ảnh, padding)
+                scores_masked_i = scores_i.masked_fill(mask[i] == 0, float('-inf'))
+                
+                # Tính số lượng text token CỦA RIÊNG CÂU NÀY
+                valid_len_i = int(mask[i].sum().item())
+                
+                # Giới hạn k cho riêng câu này (nhặt tối đa k, hoặc lấy hết nếu text ngắn hơn k)
+                actual_k_i = min(k, valid_len_i)
+            else:
+                scores_masked_i = scores_i
+                actual_k_i = min(k, L)
+            
+            # An toàn: Nếu câu hoàn toàn không có text nào (ví dụ: batch lỗi), bỏ qua
+            if actual_k_i == 0:
+                continue
+                
+            # 2. Lấy top-k indices riêng cho câu này
+            # Lưu ý dim=0 vì mảng scores_masked_i lúc này là mảng 1D [L]
+            _, top_k_indices_i = torch.topk(scores_masked_i, k=actual_k_i, dim=0) # [actual_k_i]
+            
+            # 3. Trích xuất hidden states (Bốc đúng các hàng tương ứng)
+            small_sub_i = h_small[i][top_k_indices_i]  # Shape: [actual_k_i, d_small]
+            full_sub_i = h_full[i][top_k_indices_i]    # Shape: [actual_k_i, d_full]
+            
+            # 4. Tính CKA similarity trực tiếp trên ma trận 2D
+            cka_sim_i = self.cka_loss.compute_cka_single(small_sub_i, full_sub_i)
+            
+            # Cộng dồn khoảng cách (1 - similarity)
+            total_cka_dist += (1.0 - cka_sim_i.float())
+            valid_items_in_batch += 1
+            
+        # 5. Trả về Loss trung bình của cả Batch
+        if valid_items_in_batch > 0:
+            return total_cka_dist / valid_items_in_batch
+        else:
+            # Fallback nếu cả batch đều rỗng text (rất hiếm khi xảy ra)
+            return torch.tensor(0.0, device=h_small.device, requires_grad=True)
 
 class VLMPipelineInfoNCELoss(nn.Module):
     """
@@ -477,6 +459,9 @@ class MIPICLoss(nn.Module):
         qry_attention_mask = []
         pos_attention_mask = []
 
+        qry_text_only_mask = []
+        pos_text_only_mask = []
+
         for i in range(bs):
             # 1. QUERY Processing
             if qry_image_features is not None and \
@@ -492,6 +477,14 @@ class MIPICLoss(nn.Module):
                     student_input_qry['attention_mask'][i]
                 )
                 qry_attention_mask.append(qry_full_attention_mask)
+
+                qry_text_only_mask.append(get_text_only_attention_mask(
+                    qry_hidden_states[-1][i],
+                    num_student_text_qry_tokens[i].item(),
+                    stu_feat.size(0),
+                    student_input_qry['attention_mask'][i]
+                ))
+
                 cur_idx_qry_img += 1
             else:
                 # --- Text Only case ---
@@ -503,6 +496,12 @@ class MIPICLoss(nn.Module):
                 )
                 qry_attention_mask.append(qry_full_attention_mask)
 
+                qry_text_only_mask.append(get_text_only_attention_mask(
+                    qry_hidden_states[-1][i],
+                    num_student_text_qry_tokens[i].item(),
+                    0,
+                    student_input_qry['attention_mask'][i]
+                ))
             # 2. POS Processing
             if pos_image_features is not None and \
                 cur_idx_pos_img < len(pos_image_features):
@@ -517,6 +516,12 @@ class MIPICLoss(nn.Module):
                     student_input_pos['attention_mask'][i]
                 )
                 pos_attention_mask.append(pos_full_attention_mask)
+                pos_text_only_mask.append(get_text_only_attention_mask(
+                    pos_hidden_states[-1][i],
+                    num_student_text_pos_tokens[i].item(),
+                    stu_feat.size(0),
+                    student_input_pos['attention_mask'][i]
+                ))
                 cur_idx_pos_img += 1
             else:
                 # --- Text Only case ---
@@ -527,9 +532,18 @@ class MIPICLoss(nn.Module):
                     student_input_pos['attention_mask'][i]
                 )
                 pos_attention_mask.append(pos_full_attention_mask)
+                pos_text_only_mask.append(get_text_only_attention_mask(
+                    pos_hidden_states[-1][i],
+                    num_student_text_pos_tokens[i].item(),
+                    0,
+                    student_input_pos['attention_mask'][i]
+                ))
 
         qry_attention_mask = torch.stack(qry_attention_mask, dim=0)  # [B, L]
         pos_attention_mask = torch.stack(pos_attention_mask, dim=0)  # [B, L]
+
+        qry_text_only_mask = torch.stack(qry_text_only_mask, dim=0)  # [B, L]
+        pos_text_only_mask = torch.stack(pos_text_only_mask, dim=0)  # [B, L]
 
         contrastive_loss, _ = Matry_infonce(all_qry_reps, all_pos_reps, temperature=temperature, nested_dims=self.nested_dims)
 
@@ -540,53 +554,78 @@ class MIPICLoss(nn.Module):
         align_count = 0
         
         # Base k để tính tỷ lệ top-k token (có thể truyền qua args)
-        base_k = getattr(self.args, 'base_k', 64) 
+        base_k = getattr(self.args, 'base_k', 16) 
         
-        # Tính trên Query (thường self-distillation tính trên Query là đủ)
+        # Vòng lặp SIA cho cả QRY và POS
         for layer_idx in self.align_layers:
-            # qry_hidden_states là tuple/list các tensor. Lấy tensor của layer cần tính
-            layer_hidden = qry_hidden_states[layer_idx] # [B, L, d_full]
-            current_dtype = layer_hidden.dtype
+            qry_layer_hidden = qry_hidden_states[layer_idx]
+            pos_layer_hidden = pos_hidden_states[layer_idx]
 
             for dim in self.nested_dims:
                 if dim >= self.d_full: continue
                 
                 key = f"layer_{layer_idx}_dim_{dim}"
-                attn_module = self.attn_alignments[key].to(device=device, dtype=current_dtype)
+                attn_module = self.attn_alignments[key].to(device=device, dtype=qry_layer_hidden.dtype)
                 
-                # Cắt hidden state xuống d_small
-                h_small = layer_hidden[..., :dim]
-                h_full = layer_hidden
+                # --- XỬ LÝ QRY ---
+                qry_h_small = qry_layer_hidden[..., :dim]
+                qry_h_full = qry_layer_hidden
                 
-                # --------------------------------------------------
-                # 2A: Attention Distribution Matching
-                # --------------------------------------------------
-                # QUAN TRỌNG: Lấy lại small_scores để dùng cho bước CKA
-                kl_loss, small_scores, _ = attn_module(
-                    h_small=h_small, 
-                    h_full=h_full, 
-                    mask=qry_attention_mask, 
+                # Truyền CẢ full_mask VÀ text_only_mask
+                qry_kl_loss, qry_small_scores, _ = attn_module(
+                    h_small=qry_h_small, 
+                    h_full=qry_h_full, 
+                    full_mask=qry_attention_mask, 
+                    text_mask=qry_text_only_mask,
                     temperature=temperature 
                 )
                 
-                # --------------------------------------------------
-                # 2B: Top-k Hidden State Alignment via CKA
-                # --------------------------------------------------
-                # Xác định số lượng k_i token dựa trên tỷ lệ kích thước dimension
-                # Công thức: k_i = max(8, (dim / d_full) * base_k)
+                # --- XỬ LÝ POS ---
+                pos_h_small = pos_layer_hidden[..., :dim]
+                pos_h_full = pos_layer_hidden
+                
+                # Truyền CẢ full_mask VÀ text_only_mask
+                pos_kl_loss, pos_small_scores, _ = attn_module(
+                    h_small=pos_h_small, 
+                    h_full=pos_h_full, 
+                    full_mask=pos_attention_mask, 
+                    text_mask=pos_text_only_mask,
+                    temperature=temperature 
+                )
+                
+                # Tính trung bình KL Loss
+                kl_loss = (qry_kl_loss + pos_kl_loss) / 2.0
+                
+                # --- TÍNH CKA CHO CẢ QRY VÀ POS CHỈ TRÊN TEXT ---
+                # Tính lượng k lý thuyết
                 k_i = max(8, int((dim / self.d_full) * base_k))
                 
-                self.cka_module = self.cka_module.to(device=device, dtype=current_dtype)
+                # Giới hạn k_i không vượt quá số lượng text tokens thực tế ngắn nhất trong batch
+                min_qry_text_len = int(qry_text_only_mask.sum(dim=1).min().item())
+                qry_k_i = min(k_i, min_qry_text_len)
 
-                cka_loss = self.cka_module(
-                    h_small=h_small,
-                    h_full=h_full,
-                    small_scores=small_scores, # Dùng điểm Attention của chiều nhỏ làm định hướng
-                    k=k_i,
-                    mask=qry_attention_mask
-                ).to(device)
+                qry_cka_loss = self.cka_module(
+                    h_small=qry_h_small,
+                    h_full=qry_h_full,
+                    small_scores=qry_small_scores, 
+                    k=qry_k_i,
+                    mask=qry_text_only_mask # CHỈ dùng text_mask
+                )
 
+                # Làm tương tự cho POS
+                min_pos_text_len = int(pos_text_only_mask.sum(dim=1).min().item())
+                pos_k_i = min(k_i, min_pos_text_len)
 
+                pos_cka_loss = self.cka_module(
+                    h_small=pos_h_small,
+                    h_full=pos_h_full,
+                    small_scores=pos_small_scores, 
+                    k=pos_k_i,
+                    mask=pos_text_only_mask # CHỈ dùng text_mask
+                )
+                
+                # Tính trung bình CKA Loss
+                cka_loss = (qry_cka_loss + pos_cka_loss) / 2.0
                 
                 total_attn_loss += kl_loss
                 total_cka_loss += cka_loss
