@@ -335,6 +335,7 @@ class MIPICLoss(nn.Module):
         self.average_loss = getattr(args, 'average_loss', True)
         
         self.kd_weight = getattr(args, 'kd_weight', 1.0)
+        self.optimizer = getattr(args, 'optimizer', None)
 
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -405,7 +406,18 @@ class MIPICLoss(nn.Module):
                 d_tgt=d_tgt, 
                 d_hidden=max(d_src, d_tgt) // 2
             )
-    
+
+        if self.optimizer is not None:
+            # Lọc ra các tham số cần cập nhật gradient trong MIPICLoss
+            loss_params = [p for p in self.parameters() if p.requires_grad]
+            lr = args.learning_rate
+            if len(loss_params) > 0:
+                # Thêm param group mới vào optimizer hiện tại
+                self.optimizer.add_param_group({
+                    'params': loss_params,
+                    'lr': lr
+                })
+                print(f"Đã thêm {len(loss_params)} tensor tham số từ MIPICLoss vào Optimizer.")
 
     def _dist_gather_tensor(self, t: Tensor):
         t = t.contiguous()
