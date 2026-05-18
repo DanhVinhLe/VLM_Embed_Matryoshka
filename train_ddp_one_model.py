@@ -293,6 +293,8 @@ def main():
         from transformers import get_constant_schedule
         lr_scheduler = get_constant_schedule(optimizer)
         
+    setattr(training_args, 'optimizer', optimizer)
+
     criterion = build_criterion(training_args)
     trainer = Trainer(model_trainer, train_dataloader, optimizer, lr_scheduler, criterion, model_args, training_args)
     trainer.train()
